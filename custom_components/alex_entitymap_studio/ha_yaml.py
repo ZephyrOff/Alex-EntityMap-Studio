@@ -122,3 +122,15 @@ def load_yaml_with_includes(config_yaml_path: str) -> dict:
     except yaml.YAMLError:
         return {}
     return result if isinstance(result, dict) else {}
+
+
+def load_yaml_file(path: str) -> dict:
+    """Charge un fichier YAML quelconque isolement (ex. un fichier de
+    blueprint), avec le meme filet de securite sur les tags inconnus
+    (!input notamment, traite comme du texte brut par le gestionnaire
+    generique -- utile pour la resolution des blueprints, voir scanner.py)."""
+    try:
+        result = _load_file(path, os.path.dirname(path))
+    except yaml.YAMLError:
+        return {}
+    return result if isinstance(result, dict) else {}

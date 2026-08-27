@@ -31,7 +31,7 @@ from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
-from .ha_yaml import load_yaml_with_includes
+from .ha_yaml import load_yaml_file, load_yaml_with_includes
 from .jinja_pattern import find_templated_entity_refs
 
 _LOGGER = logging.getLogger(__name__)
@@ -147,6 +147,54 @@ def _matches_from_candidates(
     return out
 
 
+def _scan_blueprint(
+    hass: HomeAssistant,
+    source_type: str,
+    use_blueprint: dict,
+    source_id: str,
+    known_ids: set[str],
+) -> list[Reference]:
+    """Resout un `use_blueprint: {path, input}` en lisant le fichier de
+    blueprint lui-meme (`/config/blueprints/<domaine>/<path>`) -- sans ca,
+    la logique reelle (ce que le blueprint fait, ex. `action:
+    script.light_scheduler`) reste invisible : elle vit dans un fichier
+    separe, jamais dans automations.yaml/scripts.yaml. Chaque `!input x`
+    rencontre dans le blueprint est substitue par la vraie valeur fournie
+    par CETTE instance precise (`input.x`) avant de chercher des entites."""
+    path = use_blueprint.get("path")
+    resolved_inputs = use_blueprint.get("input") or {}
+    if not path or not isinstance(resolved_inputs, dict):
+        return []
+
+    full_path = os.path.join(hass.config.config_dir, "blueprints", source_type, path)
+    bp_tree = load_yaml_file(full_path)
+    if not bp_tree:
+        return []
+
+    declared_inputs = set((bp_tree.get("blueprint") or {}).get("input") or {})
+    body = {k: v for k, v in bp_tree.items() if k != "blueprint"}
+
+    refs: list[Reference] = []
+    for _path, text in _iter_strings(body):
+        # La chaine EST exactement un nom d'input du blueprint (provient
+        # d'un tag !input, charge tel quel comme texte brut) : on substitue
+        # la vraie valeur avant de chercher des entites, plutot que de
+        # chercher des entites dans le nom du champ lui-meme.
+        if text in declared_inputs and text in resolved_inputs:
+            value = resolved_inputs[text]
+            if isinstance(value, str):
+                literals, patterns = _candidates_from_string(value)
+                for entity_id, confidence in _matches_from_candidates(literals, patterns, known_ids):
+                    refs.append(Reference(entity_id, source_type, source_id, confidence))
+            continue
+        # Reference litterale fixe, independante de tout input (ex.
+        # `action: script.light_scheduler` dans le corps du blueprint).
+        literals, patterns = _candidates_from_string(text)
+        for entity_id, confidence in _matches_from_candidates(literals, patterns, known_ids):
+            refs.append(Reference(entity_id, source_type, source_id, confidence))
+    return refs
+
+
 def _scan_automations_and_scripts(hass: HomeAssistant, known_ids: set[str]) -> list[Reference]:
     tree = _load_yaml_tree(hass)
     refs: list[Reference] = []
@@ -164,6 +212,14 @@ def _scan_automations_and_scripts(hass: HomeAssistant, known_ids: set[str]) -> l
             if not isinstance(entry, dict):
                 continue
             source_id = entry.get("alias") or entry.get("id") or "?"
+
+            use_blueprint = entry.get("use_blueprint")
+            if isinstance(use_blueprint, dict):
+                # Config generee par un blueprint : la logique reelle vit
+                # dans le fichier de blueprint, pas ici -- scan dedie.
+                refs.extend(_scan_blueprint(hass, source_type, use_blueprint, str(source_id), known_ids))
+                continue
+
             for _path, text in _iter_strings(entry):
                 literals, patterns = _candidates_from_string(text)
                 for entity_id, confidence in _matches_from_candidates(literals, patterns, known_ids):

@@ -60,6 +60,14 @@ invité).
   s'appuyer sur une API interne de Home Assistant dont le comportement
   exact, appelée depuis une intégration tierce, n'a pas pu être confirmé de
   façon fiable.
+- **Automatisations/scripts basés sur un blueprint** (`use_blueprint:`) —
+  résolus explicitement : le fichier de blueprint lui-même
+  (`/config/blueprints/<domaine>/<path>`) est lu, et chaque `!input x`
+  qu'il contient est remplacé par la vraie valeur fournie par **cette
+  instance précise** avant de chercher des références d'entités. Sans ça,
+  la logique réelle d'un script/une automatisation généré par blueprint
+  resterait invisible — elle vit dans un fichier séparé, jamais dans
+  `automations.yaml`/`scripts.yaml`.
 - **Dashboards gérés par l'interface** — fichiers `.storage/lovelace*`
   (JSON). Les dashboards en mode YAML pur sont couverts indirectement s'ils
   sont inclus depuis `configuration.yaml`.
