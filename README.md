@@ -81,6 +81,24 @@ invité).
   `last_changed` (tout autre domaine, changement d'état natif là aussi).
   Aucune dépendance à une base de données d'historique.
 
+## Navigation
+
+Les entrées de « Dépendances » et « Appelants » sont cliquables :
+
+- **Entité classique** (sensor, input_text...) → ouvre la fenêtre d'information
+  standard de HA (`hass-more-info`).
+- **Automatisation** → `/config/automation/edit/<id>`. Le `nav_id` utilisé est
+  l'`unique_id` de l'entité (HA le définit comme l'`id:` de la config YAML pour
+  cette plateforme — plus fiable qu'analyser le YAML nous-mêmes).
+- **Script** → `/config/script/edit/<object_id>`.
+- **Scène** → `/config/scene/edit/<id>`, même principe que les automatisations.
+- **Dashboard** → reconstruit depuis le nom du fichier de stockage
+  (`lovelace.dashboard_jc` → `/dashboard_jc/0`) — pointe vers la première vue
+  du dashboard, pas encore vers la vue/carte précise (non tracée pour l'instant).
+
+Sans correspondance résolue (alias/id introuvable dans le registre), l'entrée
+reste affichée mais non cliquable, plutôt que de naviguer au mauvais endroit.
+
 ## Non couvert (pour l'instant)
 
 Date de création/modification d'une entité — non tracée de façon fiable par

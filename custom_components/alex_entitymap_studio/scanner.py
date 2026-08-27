@@ -54,6 +54,7 @@ class Reference:
     source_id: str  # alias/id de l'automatisation ou du script, titre de la vue+carte pour un dashboard
     confidence: str  # "exact" | "pattern" | "blueprint" (marqueur d'usage, pas une entite)
     via_blueprint: bool = False  # trouvee en resolvant le fichier de blueprint, pas dans le corps direct
+    source_nav_id: str | None = None  # identifiant pour naviguer vers la source (id d'automatisation/scene, object_id de script) -- resolu apres coup, voir build_entity_map
 
 
 @dataclass
@@ -68,6 +69,7 @@ class EntityInfo:
     last_used_kind: str  # "last_triggered" | "last_changed" | "inconnu"
     disabled: bool
     hidden: bool
+    nav_id: str | None = None  # identifiant pour naviguer vers l'editeur (automatisation/scene/script)
     references: list[Reference] = field(default_factory=list)  # qui APPELLE cette entite
     dependencies: list[Reference] = field(default_factory=list)  # ce que CETTE entite utilise (scripts/automatisations)
 
@@ -355,6 +357,46 @@ def build_entity_map(hass: HomeAssistant) -> list[EntityInfo]:
     known_ids = _known_entity_ids(hass)
 
     all_refs = _dedupe_refs(_scan_automations_and_scripts(hass, known_ids) + _scan_dashboards(hass, known_ids))
+
+    # nav_id de chaque entite automation/script/scene, pour la navigation
+    # depuis le panel (editeur d'automatisation/scene, editeur de script).
+    # Pour automation/scene, HA definit unique_id = id de la config YAML --
+    # plus fiable que de re-analyser le YAML nous-memes pour retrouver cette
+    # correspondance (l'entity_id resultant peut deriver de l'alias, du id,
+    # ou etre renomme manuellement -- unique_id, lui, ne bouge pas).
+    nav_id_by_entity: dict[str, str | None] = {}
+    for entry in registry.entities.values():
+        domain = entry.entity_id.split(".", 1)[0]
+        object_id = entry.entity_id.split(".", 1)[1]
+        if domain == "script":
+            nav_id_by_entity[entry.entity_id] = object_id
+        elif domain in ("automation", "scene"):
+            nav_id_by_entity[entry.entity_id] = entry.unique_id
+
+    # Table (type de source, alias/id slugifie) -> nav_id, pour annoter les
+    # References cote "appelant" (qui n'ont qu'un texte d'affichage, pas
+    # directement l'entity_id de la source).
+    nav_id_by_source_slug: dict[tuple[str, str], str] = {}
+    for entry in registry.entities.values():
+        domain = entry.entity_id.split(".", 1)[0]
+        if domain not in ("automation", "script"):
+            continue
+        nav_id = nav_id_by_entity.get(entry.entity_id)
+        if not nav_id:
+            continue
+        object_id = entry.entity_id.split(".", 1)[1]
+        state = hass.states.get(entry.entity_id)
+        display_name = (state.attributes.get("friendly_name") if state else None) or entry.name or object_id
+        for candidate in (object_id, display_name):
+            nav_id_by_source_slug[(domain, _slug(candidate))] = nav_id
+
+    for ref in all_refs:
+        if ref.source_type == "dashboard":
+            continue  # resolu cote panel directement depuis le nom du fichier
+        nav = nav_id_by_source_slug.get((ref.source_type, _slug(ref.source_id)))
+        if nav:
+            ref.source_nav_id = nav
+
     refs_by_entity: dict[str, list[Reference]] = {}
     for ref in all_refs:
         refs_by_entity.setdefault(ref.entity_id, []).append(ref)
@@ -398,6 +440,7 @@ def build_entity_map(hass: HomeAssistant) -> list[EntityInfo]:
                 last_used_kind=last_used_kind,
                 disabled=entry.disabled_by is not None,
                 hidden=entry.hidden_by is not None,
+                nav_id=nav_id_by_entity.get(entry.entity_id),
                 references=refs_by_entity.get(entry.entity_id, []),
                 dependencies=dependencies,
             )

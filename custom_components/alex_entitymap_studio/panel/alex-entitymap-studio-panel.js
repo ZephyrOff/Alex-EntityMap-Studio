@@ -164,6 +164,8 @@ class AlexEntityMapStudioPanel extends HTMLElement {
           border: 1px solid var(--divider-color, #333);
           font-size: 13px;
         }
+        .ref-item.clickable { cursor: pointer; transition: background .12s ease; }
+        .ref-item.clickable:hover { background: rgba(255,255,255,.06); }
         .badge {
           font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
           background: rgba(255,255,255,.1); flex: 0 0 auto;
@@ -280,6 +282,54 @@ class AlexEntityMapStudioPanel extends HTMLElement {
 
   // Pour "Appelants" : qui reference l'entite selectionnee -- affiche la
   // source (automatisation/script/dashboard).
+  // --- Navigation -----------------------------------------------------
+
+  _openMoreInfo(entityId) {
+    this.dispatchEvent(
+      new CustomEvent("hass-more-info", {
+        detail: { entityId },
+        bubbles: true,
+        composed: true,
+      })
+    );
+  }
+
+  _navigate(path) {
+    history.pushState(null, "", path);
+    this.dispatchEvent(new CustomEvent("location-changed", { bubbles: true, composed: true }));
+  }
+
+  // "lovelace" (dashboard par defaut, fichier de stockage sans suffixe) ->
+  // /lovelace/0 ; "lovelace.dashboard_jc" -> /dashboard_jc/0. Le nom du
+  // fichier de stockage encode directement le chemin d'URL du dashboard --
+  // confirme en inspectant des configurations HA reelles. Pointe vers la
+  // premiere vue (index 0) : la vue/carte precise n'est pas encore tracee,
+  // seulement le dashboard dans son ensemble.
+  _dashboardUrlFromFilename(filename) {
+    const withoutPrefix = filename.replace(/^lovelace\.?/, "");
+    const urlPath = withoutPrefix || "lovelace";
+    return `/${urlPath}/0`;
+  }
+
+  // Determine comment naviguer vers UNE entite precise (utilise a la fois
+  // pour les cibles de "Dependances" et, indirectement, pour resoudre le
+  // nav_id d'une entite deja chargee dans this._entities).
+  _entityClickHandler(entityId) {
+    const info = this._entities.find((e) => e.entity_id === entityId);
+    if (info && info.nav_id && info.domain === "script") {
+      return () => this._navigate(`/config/script/edit/${encodeURIComponent(info.nav_id)}`);
+    }
+    if (info && info.nav_id && info.domain === "automation") {
+      return () => this._navigate(`/config/automation/edit/${encodeURIComponent(info.nav_id)}`);
+    }
+    if (info && info.nav_id && info.domain === "scene") {
+      return () => this._navigate(`/config/scene/edit/${encodeURIComponent(info.nav_id)}`);
+    }
+    return () => this._openMoreInfo(entityId);
+  }
+
+  // Pour "Appelants" : qui reference l'entite selectionnee -- affiche la
+  // source (automatisation/script/dashboard), cliquable pour y naviguer.
   _renderCallerList(refs) {
     if (!refs || refs.length === 0) {
       return `<div class="empty">Aucune trouvée.</div>`;
@@ -288,8 +338,8 @@ class AlexEntityMapStudioPanel extends HTMLElement {
       <div class="ref-list">
         ${refs
           .map(
-            (r) => `
-              <div class="ref-item">
+            (r, i) => `
+              <div class="ref-item clickable" data-caller-index="${i}">
                 <span class="badge">${escapeHtml(SOURCE_TYPE_LABELS[r.source_type] || r.source_type)}</span>
                 <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
                   ${escapeHtml(r.source_id)}
@@ -301,10 +351,30 @@ class AlexEntityMapStudioPanel extends HTMLElement {
       </div>`;
   }
 
+  _wireCallerList(container, refs) {
+    container.querySelectorAll("[data-caller-index]").forEach((el) => {
+      const ref = refs[parseInt(el.getAttribute("data-caller-index"), 10)];
+      if (!ref) return;
+      if (ref.source_type === "dashboard") {
+        el.addEventListener("click", () => this._navigate(this._dashboardUrlFromFilename(ref.source_id)));
+      } else if (ref.source_nav_id) {
+        const path =
+          ref.source_type === "automation"
+            ? `/config/automation/edit/${encodeURIComponent(ref.source_nav_id)}`
+            : `/config/script/edit/${encodeURIComponent(ref.source_nav_id)}`;
+        el.addEventListener("click", () => this._navigate(path));
+      }
+      // Sans source_nav_id resolu (correspondance alias/id non trouvee),
+      // l'element reste affiche mais non cliquable plutot que de naviguer
+      // vers un mauvais endroit.
+    });
+  }
+
   // Pour "Dépendances" : ce que l'entite selectionnee utilise -- affiche la
   // CIBLE (entity_id reference), pas la source (qui serait toujours
   // l'entite elle-meme, sans interet). Cas special "blueprint" : signale
-  // explicitement l'usage d'un blueprint, meme sans entite associee.
+  // explicitement l'usage d'un blueprint, meme sans entite associee (pas
+  // cliquable, ce n'est pas une entite).
   _renderDependencyList(refs) {
     if (!refs || refs.length === 0) {
       return `<div class="empty">Aucune trouvée.</div>`;
@@ -312,7 +382,7 @@ class AlexEntityMapStudioPanel extends HTMLElement {
     return `
       <div class="ref-list">
         ${refs
-          .map((r) => {
+          .map((r, i) => {
             if (r.confidence === "blueprint") {
               const bpPath = r.entity_id.replace(/^blueprint:/, "");
               return `
@@ -325,7 +395,7 @@ class AlexEntityMapStudioPanel extends HTMLElement {
             }
             const domain = r.entity_id.split(".")[0];
             return `
-              <div class="ref-item">
+              <div class="ref-item clickable" data-dep-index="${i}">
                 <span class="badge">${escapeHtml(domain)}</span>
                 <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
                   ${escapeHtml(r.entity_id)}
@@ -336,6 +406,14 @@ class AlexEntityMapStudioPanel extends HTMLElement {
           })
           .join("")}
       </div>`;
+  }
+
+  _wireDependencyList(container, refs) {
+    container.querySelectorAll("[data-dep-index]").forEach((el) => {
+      const ref = refs[parseInt(el.getAttribute("data-dep-index"), 10)];
+      if (!ref || ref.confidence === "blueprint") return;
+      el.addEventListener("click", this._entityClickHandler(ref.entity_id));
+    });
   }
 
   _renderContent() {
@@ -387,6 +465,11 @@ class AlexEntityMapStudioPanel extends HTMLElement {
           : ""
       }
     `;
+
+    if (entity.domain === "automation" || entity.domain === "script") {
+      this._wireDependencyList(content, entity.dependencies || []);
+    }
+    this._wireCallerList(content, entity.references || []);
   }
 }
 
