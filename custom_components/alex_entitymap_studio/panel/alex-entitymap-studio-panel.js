@@ -170,6 +170,7 @@ class AlexEntityMapStudioPanel extends HTMLElement {
         }
         .badge.pattern { background: rgba(244,169,53,.25); color: #f4a935; }
         .badge.exact { background: rgba(76,175,80,.2); color: #4caf50; }
+        .badge.blueprint { background: rgba(3,169,244,.2); color: #03a9f4; }
         .empty { font-size: 13px; color: var(--secondary-text-color); padding: 8px 0; }
         .hint { font-size: 12px; color: var(--secondary-text-color); margin-top: 8px; line-height: 1.4; }
         .error { color: var(--error-color, #db4437); font-size: 13px; padding: 12px; }
@@ -329,6 +330,7 @@ class AlexEntityMapStudioPanel extends HTMLElement {
                 <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
                   ${escapeHtml(r.entity_id)}
                 </span>
+                ${r.via_blueprint ? `<span class="badge blueprint">via blueprint</span>` : ""}
                 <span class="badge ${r.confidence}">${r.confidence === "pattern" ? "détecté par motif" : "littéral"}</span>
               </div>`;
           })

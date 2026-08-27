@@ -52,7 +52,8 @@ class Reference:
     entity_id: str
     source_type: str  # "automation" | "script" | "dashboard"
     source_id: str  # alias/id de l'automatisation ou du script, titre de la vue+carte pour un dashboard
-    confidence: str  # "exact" | "pattern"
+    confidence: str  # "exact" | "pattern" | "blueprint" (marqueur d'usage, pas une entite)
+    via_blueprint: bool = False  # trouvee en resolvant le fichier de blueprint, pas dans le corps direct
 
 
 @dataclass
@@ -136,21 +137,28 @@ def _matches_from_candidates(
     literals: set[str], patterns: set[str], known_ids: set[str]
 ) -> list[tuple[str, str]]:
     """Confronte les candidats au registre reel. Renvoie une liste de
-    (entity_id, confidence)."""
-    out: list[tuple[str, str]] = []
+    (entity_id, confidence).
+
+    Un `states('input_datetime.matin')` (chaine constante, sans
+    concatenation) passe par le meme chemin d'extraction que les motifs
+    dynamiques -- resultat techniquement classe "pattern" alors qu'il n'y a
+    en realite aucun joker. Priorite au littteral ici, pour la meme entite,
+    plutot que de laisser les deux coexister comme si c'etaient deux faits
+    distincts."""
+    best: dict[str, str] = {}
     for lit in literals:
         if lit in known_ids:
-            out.append((lit, "exact"))
+            best[lit] = "exact"
     if patterns:
         combined = "^(?:" + "|".join(patterns) + ")$"
         try:
             compiled = re.compile(combined)
         except re.error:
-            return out
+            return list(best.items())
         for entity_id in known_ids:
-            if compiled.match(entity_id):
-                out.append((entity_id, "pattern"))
-    return out
+            if compiled.match(entity_id) and entity_id not in best:
+                best[entity_id] = "pattern"
+    return list(best.items())
 
 
 def _scan_blueprint(
@@ -206,8 +214,7 @@ def _scan_blueprint(
     # Signale explicitement l'usage du blueprint lui-meme, meme si aucune
     # entite n'est trouvee a l'interieur -- demande explicite : au minimum,
     # savoir que ce script depend de ce blueprint precis.
-    bp_name = (bp_tree.get("blueprint") or {}).get("name") or path
-    refs.append(Reference(f"blueprint:{path}", source_type, source_id, "blueprint"))
+    refs.append(Reference(f"blueprint:{path}", source_type, source_id, "blueprint", via_blueprint=True))
 
     for _path, text in _iter_strings(body):
         # La chaine EST exactement un nom d'input du blueprint (provient
@@ -219,26 +226,18 @@ def _scan_blueprint(
             if isinstance(value, str):
                 literals, patterns = _candidates_from_string(value, global_aliases)
                 for entity_id, confidence in _matches_from_candidates(literals, patterns, known_ids):
-                    refs.append(Reference(entity_id, source_type, source_id, confidence))
+                    refs.append(Reference(entity_id, source_type, source_id, confidence, via_blueprint=True))
             continue
         # Reference litterale ou templatee, avec les alias globaux de
         # l'instance en plus des eventuels alias locaux a cette chaine.
         literals, patterns = _candidates_from_string(text, global_aliases)
         for entity_id, confidence in _matches_from_candidates(literals, patterns, known_ids):
-            refs.append(Reference(entity_id, source_type, source_id, confidence))
+            refs.append(Reference(entity_id, source_type, source_id, confidence, via_blueprint=True))
 
-    # Deduplique : une meme reference peut legitimement apparaitre dans
-    # plusieurs endroits du blueprint (ex. `!input target_light` repete a
-    # 5 endroits differents de la sequence) -- redondant a afficher.
-    seen: set[tuple[str, str, str, str]] = set()
-    deduped: list[Reference] = []
-    for ref in refs:
-        key = (ref.entity_id, ref.source_type, ref.source_id, ref.confidence)
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(ref)
-    return deduped
+    # La deduplication (y compris entre litteral et motif pour une meme
+    # entite) se fait globalement dans build_entity_map, une fois toutes
+    # les sources rassemblees -- pas seulement au sein de ce blueprint.
+    return refs
 
 
 def _scan_automations_and_scripts(hass: HomeAssistant, known_ids: set[str]) -> list[Reference]:
@@ -318,6 +317,31 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
 
 
+# Un meme fait (cette source reference cette entite) peut etre trouve
+# plusieurs fois par des chemins differents -- ex. une fois comme litteral
+# exact, une fois comme "motif" via l'extraction states(...) generique
+# meme quand il n'y avait en realite aucun joker dynamique (voir
+# _matches_from_candidates). Priorite : exact > pattern > blueprint (ce
+# dernier n'est pas une entite, un marqueur d'usage a part).
+_CONFIDENCE_RANK = {"exact": 2, "pattern": 1, "blueprint": 0}
+
+
+def _dedupe_refs(refs: list[Reference]) -> list[Reference]:
+    """Deduplique globalement par (entite, source) -- garde la version la
+    plus fiable quand le meme fait a ete trouve par plusieurs chemins
+    (litteral + motif pour la meme entite, ou la meme reference repetee a
+    plusieurs endroits d'un meme fichier/blueprint)."""
+    best: dict[tuple[str, str, str], Reference] = {}
+    for ref in refs:
+        key = (ref.entity_id, ref.source_type, ref.source_id)
+        current = best.get(key)
+        if current is None or _CONFIDENCE_RANK.get(ref.confidence, 0) > _CONFIDENCE_RANK.get(
+            current.confidence, 0
+        ):
+            best[key] = ref
+    return list(best.values())
+
+
 def build_entity_map(hass: HomeAssistant) -> list[EntityInfo]:
     """Point d'entree principal : construit la liste complete des entites
     avec leurs infos, references (qui les appelle) et dependances (ce
@@ -325,7 +349,7 @@ def build_entity_map(hass: HomeAssistant) -> list[EntityInfo]:
     registry = er.async_get(hass)
     known_ids = _known_entity_ids(hass)
 
-    all_refs = _scan_automations_and_scripts(hass, known_ids) + _scan_dashboards(hass, known_ids)
+    all_refs = _dedupe_refs(_scan_automations_and_scripts(hass, known_ids) + _scan_dashboards(hass, known_ids))
     refs_by_entity: dict[str, list[Reference]] = {}
     for ref in all_refs:
         refs_by_entity.setdefault(ref.entity_id, []).append(ref)
