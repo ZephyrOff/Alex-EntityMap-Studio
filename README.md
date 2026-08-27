@@ -53,9 +53,13 @@ invité).
 ## Ce que scanne l'intégration
 
 - **Automatisations et scripts** — via `configuration.yaml`, avec
-  résolution complète des `!include`/`!include_dir_*` grâce au chargeur YAML
-  natif de Home Assistant (fonctionne quelle que soit ton organisation de
-  fichiers).
+  résolution complète des `!include`/`!include_dir_list`/
+  `!include_dir_merge_list`/`!include_dir_named`/`!include_dir_merge_named`
+  (fonctionne quelle que soit ton organisation de fichiers). Chargeur YAML
+  **propre à l'intégration** (`ha_yaml.py`), testé directement plutôt que de
+  s'appuyer sur une API interne de Home Assistant dont le comportement
+  exact, appelée depuis une intégration tierce, n'a pas pu être confirmé de
+  façon fiable.
 - **Dashboards gérés par l'interface** — fichiers `.storage/lovelace*`
   (JSON). Les dashboards en mode YAML pur sont couverts indirectement s'ils
   sont inclus depuis `configuration.yaml`.

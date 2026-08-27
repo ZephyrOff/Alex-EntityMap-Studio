@@ -31,6 +31,7 @@ from homeassistant.helpers import area_registry as ar
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 
+from .ha_yaml import load_yaml_with_includes
 from .jinja_pattern import find_templated_entity_refs
 
 _LOGGER = logging.getLogger(__name__)
@@ -72,18 +73,13 @@ class EntityInfo:
 
 def _load_yaml_tree(hass: HomeAssistant) -> dict:
     """Charge configuration.yaml avec resolution complete des !include /
-    !include_dir_* via le chargeur natif de HA -- evite de reimplementer
-    cette logique nous-memes, et reste correct quelle que soit
-    l'organisation de fichiers choisie par l'utilisateur."""
-    try:
-        from homeassistant.util.yaml.loader import load_yaml
-    except ImportError:  # pragma: no cover - garde-fou si l'API interne bouge
-        _LOGGER.warning("Impossible d'importer le chargeur YAML de HA, scan desactive")
-        return {}
-
+    !include_dir_* -- via notre propre chargeur (ha_yaml.py), teste
+    directement plutot qu'un pari sur une API interne de HA dont on n'avait
+    pas de confirmation fiable de comportement quand appelee depuis une
+    integration tierce."""
     config_path = os.path.join(hass.config.config_dir, "configuration.yaml")
     try:
-        return load_yaml(config_path) or {}
+        return load_yaml_with_includes(config_path)
     except Exception:  # noqa: BLE001 - on ne veut jamais planter le scan entier
         _LOGGER.exception("Echec du chargement de configuration.yaml")
         return {}
