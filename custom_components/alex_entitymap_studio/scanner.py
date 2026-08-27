@@ -219,17 +219,22 @@ def _scan_blueprint(
     for _path, text in _iter_strings(body):
         # La chaine EST exactement un nom d'input du blueprint (provient
         # d'un tag !input, charge tel quel comme texte brut) : on substitue
-        # la vraie valeur avant de chercher des entites, plutot que de
-        # chercher des entites dans le nom du champ lui-meme.
+        # la vraie valeur avant de chercher des entites. Cette valeur (ex.
+        # `light.cagibi_light_all`) est deja directement visible dans
+        # `use_blueprint.input` du script lui-meme -- pas besoin d'avoir lu
+        # le fichier de blueprint pour la voir, donc PAS marquee
+        # "via_blueprint" malgre le fait qu'on la trouve dans ce scan-la.
         if text in declared_inputs and text in resolved_inputs:
             value = resolved_inputs[text]
             if isinstance(value, str):
                 literals, patterns = _candidates_from_string(value, global_aliases)
                 for entity_id, confidence in _matches_from_candidates(literals, patterns, known_ids):
-                    refs.append(Reference(entity_id, source_type, source_id, confidence, via_blueprint=True))
+                    refs.append(Reference(entity_id, source_type, source_id, confidence, via_blueprint=False))
             continue
-        # Reference litterale ou templatee, avec les alias globaux de
-        # l'instance en plus des eventuels alias locaux a cette chaine.
+        # Reference litterale ou templatee trouvee dans la STRUCTURE meme du
+        # blueprint (ex. le motif `suffix`, qui combine plusieurs valeurs
+        # d'une facon invisible sans lire le fichier) -- genuinement
+        # "via_blueprint" cette fois.
         literals, patterns = _candidates_from_string(text, global_aliases)
         for entity_id, confidence in _matches_from_candidates(literals, patterns, known_ids):
             refs.append(Reference(entity_id, source_type, source_id, confidence, via_blueprint=True))
