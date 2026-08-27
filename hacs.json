@@ -1,0 +1,7 @@
+{
+  "name": "Alex EntityMap Studio",
+  "content_in_root": false,
+  "zip_release": false,
+  "filename": "alex_entitymap_studio.zip",
+  "homeassistant": "2024.1.0"
+}

@@ -1,0 +1,13 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Alex EntityMap Studio",
+        "description": "Configure Alex EntityMap Studio pour explorer tes entités (pièce, dernière utilisation, dépendances et appelants à travers automatisations, scripts et dashboards)."
+      }
+    },
+    "abort": {
+      "already_configured": "Déjà configuré"
+    }
+  }
+}
