@@ -277,7 +277,9 @@ class AlexEntityMapStudioPanel extends HTMLElement {
     });
   }
 
-  _renderRefList(refs) {
+  // Pour "Appelants" : qui reference l'entite selectionnee -- affiche la
+  // source (automatisation/script/dashboard).
+  _renderCallerList(refs) {
     if (!refs || refs.length === 0) {
       return `<div class="empty">Aucune trouvée.</div>`;
     }
@@ -294,6 +296,42 @@ class AlexEntityMapStudioPanel extends HTMLElement {
                 <span class="badge ${r.confidence}">${r.confidence === "pattern" ? "détecté par motif" : "littéral"}</span>
               </div>`
           )
+          .join("")}
+      </div>`;
+  }
+
+  // Pour "Dépendances" : ce que l'entite selectionnee utilise -- affiche la
+  // CIBLE (entity_id reference), pas la source (qui serait toujours
+  // l'entite elle-meme, sans interet). Cas special "blueprint" : signale
+  // explicitement l'usage d'un blueprint, meme sans entite associee.
+  _renderDependencyList(refs) {
+    if (!refs || refs.length === 0) {
+      return `<div class="empty">Aucune trouvée.</div>`;
+    }
+    return `
+      <div class="ref-list">
+        ${refs
+          .map((r) => {
+            if (r.confidence === "blueprint") {
+              const bpPath = r.entity_id.replace(/^blueprint:/, "");
+              return `
+                <div class="ref-item">
+                  <span class="badge">Blueprint</span>
+                  <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                    ${escapeHtml(bpPath)}
+                  </span>
+                </div>`;
+            }
+            const domain = r.entity_id.split(".")[0];
+            return `
+              <div class="ref-item">
+                <span class="badge">${escapeHtml(domain)}</span>
+                <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+                  ${escapeHtml(r.entity_id)}
+                </span>
+                <span class="badge ${r.confidence}">${r.confidence === "pattern" ? "détecté par motif" : "littéral"}</span>
+              </div>`;
+          })
           .join("")}
       </div>`;
   }
@@ -326,14 +364,14 @@ class AlexEntityMapStudioPanel extends HTMLElement {
         entity.domain === "automation" || entity.domain === "script"
           ? `<div class="card">
               <h2>Dépendances (ce que cette entité utilise)</h2>
-              ${this._renderRefList(entity.dependencies)}
+              ${this._renderDependencyList(entity.dependencies)}
             </div>`
           : ""
       }
 
       <div class="card">
         <h2>Appelants (qui référence cette entité)</h2>
-        ${this._renderRefList(entity.references)}
+        ${this._renderCallerList(entity.references)}
       </div>
 
       ${

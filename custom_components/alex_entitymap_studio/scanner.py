@@ -98,11 +98,17 @@ def _iter_strings(obj, path: str = ""):
         yield path, obj
 
 
-def _candidates_from_string(text: str) -> tuple[set[str], set[str]]:
+def _candidates_from_string(
+    text: str, extra_aliases: dict[str, str] | None = None
+) -> tuple[set[str], set[str]]:
     """Renvoie (litteraux, motifs) trouves dans une chaine : les entity_id
     ecrits tels quels, et les motifs regex extraits de tout Jinja avec
     concatenation. Ni l'un ni l'autre n'est encore confronte au registre
-    reel -- fait par l'appelant, qui a acces au registre."""
+    reel -- fait par l'appelant, qui a acces au registre.
+
+    `extra_aliases` : voir find_templated_entity_refs -- propage les
+    valeurs deja connues d'un contexte exterieur (typiquement les valeurs
+    resolues d'un blueprint pour l'instance precise en cours d'analyse)."""
     literals: set[str] = set()
     patterns: set[str] = set()
 
@@ -114,7 +120,7 @@ def _candidates_from_string(text: str) -> tuple[set[str], set[str]]:
         literals.add(m.group(0))
 
     if "{{" in text or "{%" in text:
-        for result in find_templated_entity_refs(text):
+        for result in find_templated_entity_refs(text, extra_aliases):
             if result.resolved and result.regex:
                 patterns.add(result.regex)
 
@@ -156,11 +162,20 @@ def _scan_blueprint(
 ) -> list[Reference]:
     """Resout un `use_blueprint: {path, input}` en lisant le fichier de
     blueprint lui-meme (`/config/blueprints/<domaine>/<path>`) -- sans ca,
-    la logique reelle (ce que le blueprint fait, ex. `action:
-    script.light_scheduler`) reste invisible : elle vit dans un fichier
-    separe, jamais dans automations.yaml/scripts.yaml. Chaque `!input x`
-    rencontre dans le blueprint est substitue par la vraie valeur fournie
-    par CETTE instance precise (`input.x`) avant de chercher des entites."""
+    la logique reelle reste invisible : elle vit dans un fichier separe,
+    jamais dans automations.yaml/scripts.yaml. Chaque `!input x` rencontre
+    dans le blueprint est substitue par la vraie valeur fournie par CETTE
+    instance precise (`input.x`) avant de chercher des entites.
+
+    Construit aussi des alias GLOBAUX (valables pour tout le fichier, pas
+    juste la chaine en cours) a partir du bloc `variables:` de tete du
+    blueprint (`niveaux: !input niveaux` etc.) -- sans ca, une variable
+    Jinja comme `light_type`, reutilisee bien plus loin dans le fichier
+    (ex. dans un `states('input_text.' ~ ... ~ light_type ~ ...)`),
+    resterait un joker generique alors qu'elle a en realite une valeur
+    connue et fixe pour cette instance precise, ce qui elargissait le motif
+    final bien au-dela de ce qui concerne reellement CE script (il matchait
+    les entites de TOUS les scripts utilisant le meme blueprint)."""
     path = use_blueprint.get("path")
     resolved_inputs = use_blueprint.get("input") or {}
     if not path or not isinstance(resolved_inputs, dict):
@@ -172,9 +187,28 @@ def _scan_blueprint(
         return []
 
     declared_inputs = set((bp_tree.get("blueprint") or {}).get("input") or {})
+
+    # Alias globaux : pour chaque `cle: !input x` du bloc `variables:` de
+    # tete, si `x` est un input declare ET fourni par cette instance, la
+    # variable `cle` (utilisee plus loin dans TOUT le fichier) vaut
+    # litteralement cette valeur -- pas un joker.
+    global_aliases: dict[str, str] = {}
+    for var_name, raw_value in (bp_tree.get("variables") or {}).items():
+        if isinstance(raw_value, str) and raw_value in declared_inputs and raw_value in resolved_inputs:
+            resolved = resolved_inputs[raw_value]
+            if isinstance(resolved, str):
+                global_aliases[var_name] = re.escape(resolved)
+
     body = {k: v for k, v in bp_tree.items() if k != "blueprint"}
 
     refs: list[Reference] = []
+
+    # Signale explicitement l'usage du blueprint lui-meme, meme si aucune
+    # entite n'est trouvee a l'interieur -- demande explicite : au minimum,
+    # savoir que ce script depend de ce blueprint precis.
+    bp_name = (bp_tree.get("blueprint") or {}).get("name") or path
+    refs.append(Reference(f"blueprint:{path}", source_type, source_id, "blueprint"))
+
     for _path, text in _iter_strings(body):
         # La chaine EST exactement un nom d'input du blueprint (provient
         # d'un tag !input, charge tel quel comme texte brut) : on substitue
@@ -183,16 +217,28 @@ def _scan_blueprint(
         if text in declared_inputs and text in resolved_inputs:
             value = resolved_inputs[text]
             if isinstance(value, str):
-                literals, patterns = _candidates_from_string(value)
+                literals, patterns = _candidates_from_string(value, global_aliases)
                 for entity_id, confidence in _matches_from_candidates(literals, patterns, known_ids):
                     refs.append(Reference(entity_id, source_type, source_id, confidence))
             continue
-        # Reference litterale fixe, independante de tout input (ex.
-        # `action: script.light_scheduler` dans le corps du blueprint).
-        literals, patterns = _candidates_from_string(text)
+        # Reference litterale ou templatee, avec les alias globaux de
+        # l'instance en plus des eventuels alias locaux a cette chaine.
+        literals, patterns = _candidates_from_string(text, global_aliases)
         for entity_id, confidence in _matches_from_candidates(literals, patterns, known_ids):
             refs.append(Reference(entity_id, source_type, source_id, confidence))
-    return refs
+
+    # Deduplique : une meme reference peut legitimement apparaitre dans
+    # plusieurs endroits du blueprint (ex. `!input target_light` repete a
+    # 5 endroits differents de la sequence) -- redondant a afficher.
+    seen: set[tuple[str, str, str, str]] = set()
+    deduped: list[Reference] = []
+    for ref in refs:
+        key = (ref.entity_id, ref.source_type, ref.source_id, ref.confidence)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(ref)
+    return deduped
 
 
 def _scan_automations_and_scripts(hass: HomeAssistant, known_ids: set[str]) -> list[Reference]:

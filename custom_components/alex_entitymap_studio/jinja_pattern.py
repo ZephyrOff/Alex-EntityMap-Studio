@@ -89,12 +89,24 @@ def _pattern_from_parts(parts: list[nodes.Node], aliases: dict[str, str]) -> Pat
     return PatternResult(regex="".join(segments), resolved=True)
 
 
-def extract_set_aliases(template_source: str) -> dict[str, str]:
+def extract_set_aliases(
+    template_source: str, extra_aliases: dict[str, str] | None = None
+) -> dict[str, str]:
     """Parcourt un bloc de template et resout chaque `{% set x = ... %}`
     en un motif regex, dans l'ordre d'apparition (pour que les alias
     ulterieurs puissent reutiliser les precedents, comme le fait
     `suffix` a partir de `light_type`/`periode`/`light_position` dans le
     script light_scheduler).
+
+    `extra_aliases` : alias deja connus depuis un contexte exterieur (ex.
+    des valeurs de blueprint resolues) -- utilises comme point de depart
+    pour resoudre les `{% set %}` de CE texte. Indispensable : sans ca, un
+    `{% set suffix = ... ~ light_type ~ ... %}` ne peut jamais beneficier
+    d'un `light_type` deja connu venant de l'exterieur, meme si l'appelant
+    le lui fournit par ailleurs -- le motif de `suffix` resterait large
+    (jocker generique) alors que les references DIRECTES a `light_type`
+    ailleurs dans le meme texte, elles, seraient bien resolues -- une
+    incoherence qui laissait filtrer des correspondances trop larges.
 
     Une meme variable peut etre affectee plusieurs fois avec des
     concatenations DIFFERENTES (typiquement une branche par cas, comme le
@@ -102,18 +114,20 @@ def extract_set_aliases(template_source: str) -> dict[str, str]:
     differemment) : tous les motifs rencontres sont conserves et combines
     en union regex plutot que le dernier ecrasant les precedents --
     sinon une des deux formes reelles ne serait jamais retrouvee."""
-    raw_patterns: dict[str, list[str]] = {}
+    raw_patterns: dict[str, list[str]] = {
+        name: [pattern] for name, pattern in (extra_aliases or {}).items()
+    }
     try:
         ast = _ENV.parse(template_source)
     except TemplateSyntaxError:
-        return {}
+        return {name: _union(pats) for name, pats in raw_patterns.items()}
 
     for node in ast.find_all(nodes.Assign):
         target = node.target
         if not isinstance(target, nodes.Name):
             continue
         # Alias courants au moment de CETTE affectation (une union de tout
-        # ce qui a ete vu jusqu'ici pour chaque nom).
+        # ce qui a ete vu jusqu'ici pour chaque nom, extra_aliases compris).
         current_aliases = {name: _union(pats) for name, pats in raw_patterns.items()}
 
         parts = _flatten_concat(node.node)
@@ -177,12 +191,27 @@ def extract_pattern(expr_source: str, aliases: dict[str, str] | None = None) -> 
     )
 
 
-def find_templated_entity_refs(text: str) -> list[PatternResult]:
+def find_templated_entity_refs(
+    text: str, extra_aliases: dict[str, str] | None = None
+) -> list[PatternResult]:
     """Trouve, dans un texte quelconque (une valeur YAML, potentiellement
     multi-lignes), tous les blocs `{{ ... }}` et `{% set ... %}` /
     `states(...)` avec concatenation, et renvoie les motifs regex extraits
-    (resolus ou non). Fonction d'entree principale du scanner."""
-    aliases = extract_set_aliases(text)
+    (resolus ou non). Fonction d'entree principale du scanner.
+
+    `extra_aliases` : alias deja connus depuis un contexte EXTERIEUR a ce
+    texte precis (ex. les valeurs d'un blueprint resolues via
+    `variables: light_type: !input light_type` plus haut dans le meme
+    fichier, mais dans une chaine YAML differente de celle qu'on analyse
+    ici) -- sans ca, une variable comme `light_type` reste un joker
+    generique alors qu'elle a en realite une valeur connue et fixe pour
+    cette instance precise, ce qui rend le motif final bien trop large."""
+    # Passe extra_aliases DIRECTEMENT a extract_set_aliases (pas juste
+    # fusionne apres coup) : sinon un `{% set suffix = ... ~ light_type ~
+    # ... %}` a l'interieur de ce texte ne pourrait jamais en beneficier,
+    # meme si light_type est bien connu par ailleurs (voir la note dans
+    # extract_set_aliases pour le detail du probleme que ca causait).
+    aliases = extract_set_aliases(text, extra_aliases)
     results: list[PatternResult] = []
 
     for match in re.finditer(r"\{\{(.*?)\}\}", text, re.DOTALL):
