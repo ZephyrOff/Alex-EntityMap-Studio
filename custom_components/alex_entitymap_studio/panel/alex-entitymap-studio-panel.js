@@ -41,6 +41,62 @@ const SOURCE_TYPE_LABELS = {
   dashboard: "Dashboard",
 };
 
+const NODE_KIND_COLORS = {
+  trigger: "#03a9f4",
+  condition: "#f4a935",
+  if: "#f4a935",
+  choose: "#9c27b0",
+  action: "#4caf50",
+  stop: "#e53935",
+  opaque: "#757575",
+};
+const NODE_W = 190;
+const NODE_H = 56;
+
+// Disposition en couches par distance (BFS) au declencheur le plus proche --
+// testee isolement avant integration (if/then/else sur deux couches
+// distinctes cote a cote, plusieurs declencheurs convergeant correctement).
+function layoutGraph(nodes, edges, triggerIds) {
+  const depth = {};
+  const queue = [...triggerIds];
+  triggerIds.forEach((id) => (depth[id] = 0));
+  let qi = 0;
+  while (qi < queue.length) {
+    const id = queue[qi++];
+    const d = depth[id];
+    edges
+      .filter((e) => e.source === id)
+      .forEach((e) => {
+        if (depth[e.target] === undefined || depth[e.target] < d + 1) {
+          depth[e.target] = d + 1;
+          queue.push(e.target);
+        }
+      });
+  }
+  nodes.forEach((n) => {
+    if (depth[n.id] === undefined) depth[n.id] = 0;
+  });
+
+  const layers = {};
+  nodes.forEach((n) => {
+    const d = depth[n.id];
+    (layers[d] = layers[d] || []).push(n.id);
+  });
+
+  const positions = {};
+  const LAYER_HEIGHT = 130;
+  const COL_WIDTH = NODE_W + 40;
+  Object.keys(layers)
+    .sort((a, b) => a - b)
+    .forEach((d) => {
+      const ids = layers[d];
+      ids.forEach((id, i) => {
+        positions[id] = { x: 40 + i * COL_WIDTH, y: 40 + d * LAYER_HEIGHT };
+      });
+    });
+  return positions;
+}
+
 class AlexEntityMapStudioPanel extends HTMLElement {
   constructor() {
     super();
@@ -53,6 +109,24 @@ class AlexEntityMapStudioPanel extends HTMLElement {
     this._selected = null;
     this._filterDomain = "";
     this._filterText = "";
+    // Vue active : "checker" (existant), "info" (nouvelle), "automation" (nouvelle, en construction).
+    this._activeView = "checker";
+    // Cache des descriptions de services HA (get_services, commande websocket
+    // native) -- charge une seule fois, reutilise pour toutes les entites
+    // consultees en vue Entity Info plutot que de rappeler a chaque selection.
+    this._servicesCache = null;
+
+    // Vue Automation Checker.
+    this._automationSelected = null; // entity_id de l'automatisation/script choisi
+    this._automationGraph = null; // {nodes, edges, trigger_ids, condition_entities}
+    this._nodePositions = {}; // {node_id: {x,y}} -- calcule par layoutGraph, deplacable a la souris
+    this._graphPan = { x: 0, y: 0 };
+    this._graphZoom = 1;
+    this._graphDragNode = null; // id du noeud en cours de glissement, ou null
+    this._graphPanning = false;
+    this._selectedTriggerId = null;
+    this._stateOverrides = {}; // {entity_id: valeur forcee pour la simulation}
+    this._simulationResult = null; // {visited_node_ids, taken_edges, undetermined_at, stopped_reason}
   }
 
   set hass(hass) {
@@ -126,6 +200,25 @@ class AlexEntityMapStudioPanel extends HTMLElement {
           border: none; background: rgba(255,255,255,.15); color: white;
           border-radius: 8px; padding: 8px 14px; cursor: pointer; font-size: 13px;
         }
+        .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+        .btn {
+          padding: 8px 14px; border-radius: 8px; border: none; cursor: pointer;
+          font-size: 13px; font-weight: 600;
+        }
+        .btn-outline { background: rgba(255,255,255,.12); color: white; }
+        .btn-outline.active { background: white; color: var(--primary-color, #03a9f4); }
+        #graph-wrap {
+          border: 1px solid var(--divider-color, #333); border-radius: 12px;
+          overflow: hidden; background: rgba(255,255,255,.02); touch-action: none;
+        }
+        #automation-graph-svg { display: block; cursor: grab; }
+        #automation-graph-svg.panning { cursor: grabbing; }
+        .graph-node rect { stroke: white; stroke-width: 1.5; cursor: grab; }
+        .graph-node text { fill: white; font-size: 12px; pointer-events: none; }
+        .graph-node.visited rect { stroke: #ffeb3b; stroke-width: 3; }
+        .graph-edge { stroke: rgba(255,255,255,.35); stroke-width: 2; fill: none; }
+        .graph-edge.taken { stroke: #ffeb3b; stroke-width: 3; }
+        .graph-edge-label { fill: var(--secondary-text-color); font-size: 10px; }
         .layout { display: flex; height: calc(100% - 64px); }
         .sidebar {
           width: 340px; flex: 0 0 340px; overflow-y: auto;
@@ -183,11 +276,16 @@ class AlexEntityMapStudioPanel extends HTMLElement {
           <svg viewBox="0 0 24 24"><path d="M3,6H21V8H3V6M3,11H21V13H3V11M3,16H21V18H3V16Z"/></svg>
         </button>
         <h1>Alex EntityMap Studio</h1>
+        <div class="actions" style="margin:0 12px;">
+          <button class="btn btn-outline" id="nav-checker-btn">Entity Checker</button>
+          <button class="btn btn-outline" id="nav-info-btn">Entity Info</button>
+          <button class="btn btn-outline" id="nav-automation-btn">Automation Checker</button>
+        </div>
         <button class="refresh-btn" id="refresh-btn">Actualiser</button>
       </div>
 
       <div class="layout">
-        <div class="sidebar">
+        <div class="sidebar" id="entity-sidebar">
           <div class="filters">
             <select id="domain-filter">
               <option value="">Tous les domaines</option>
@@ -197,12 +295,17 @@ class AlexEntityMapStudioPanel extends HTMLElement {
           <div id="entity-list"></div>
         </div>
         <div class="content" id="content"></div>
+        <div class="content" id="automation-content" style="display:none;"></div>
       </div>
     `;
 
     this.shadowRoot.querySelector("#menu-btn").addEventListener("click", () => {
       this.dispatchEvent(new Event("hass-toggle-menu", { bubbles: true, composed: true }));
     });
+    this.shadowRoot.querySelector("#nav-checker-btn").addEventListener("click", () => this._setActiveView("checker"));
+    this.shadowRoot.querySelector("#nav-info-btn").addEventListener("click", () => this._setActiveView("info"));
+    this.shadowRoot.querySelector("#nav-automation-btn").addEventListener("click", () => this._setActiveView("automation"));
+    this._setActiveView(this._activeView);
     this.shadowRoot.querySelector("#refresh-btn").addEventListener("click", () => this._loadData());
     this.shadowRoot.querySelector("#domain-filter").addEventListener("change", (ev) => {
       this._filterDomain = ev.target.value;
@@ -283,6 +386,31 @@ class AlexEntityMapStudioPanel extends HTMLElement {
   // Pour "Appelants" : qui reference l'entite selectionnee -- affiche la
   // source (automatisation/script/dashboard).
   // --- Navigation -----------------------------------------------------
+
+  // Bascule entre les trois vues -- la barre laterale (liste d'entites)
+  // reste partagee entre "checker" et "info" (meme jeu d'entites, deux
+  // facons differentes de les consulter) ; "automation" a son propre
+  // contenu, sans la barre laterale generique.
+  _setActiveView(view) {
+    this._activeView = view;
+    const sidebar = this.shadowRoot.querySelector("#entity-sidebar");
+    const content = this.shadowRoot.querySelector("#content");
+    const automationContent = this.shadowRoot.querySelector("#automation-content");
+    if (sidebar) sidebar.style.display = view === "automation" ? "none" : "block";
+    if (content) content.style.display = view === "automation" ? "none" : "block";
+    if (automationContent) automationContent.style.display = view === "automation" ? "block" : "none";
+
+    ["checker", "info", "automation"].forEach((v) => {
+      const btn = this.shadowRoot.querySelector(`#nav-${v}-btn`);
+      if (btn) btn.classList.toggle("active", v === view);
+    });
+
+    if (view === "automation") {
+      this._renderAutomationView();
+    } else {
+      this._renderContent();
+    }
+  }
 
   _openMoreInfo(entityId) {
     this.dispatchEvent(
@@ -426,6 +554,11 @@ class AlexEntityMapStudioPanel extends HTMLElement {
       return;
     }
 
+    if (this._activeView === "info") {
+      this._renderEntityInfo(content, entity);
+      return;
+    }
+
     const hasPatternRefs =
       (entity.references || []).some((r) => r.confidence === "pattern") ||
       (entity.dependencies || []).some((r) => r.confidence === "pattern");
@@ -470,6 +603,393 @@ class AlexEntityMapStudioPanel extends HTMLElement {
       this._wireDependencyList(content, entity.dependencies || []);
     }
     this._wireCallerList(content, entity.references || []);
+  }
+
+  // --- Vue Entity Info --------------------------------------------------
+
+  // Etat live (hass.states, deja disponible cote client, pas besoin d'un
+  // aller-retour serveur) + actions possibles pour le domaine de l'entite,
+  // via la commande websocket NATIVE "get_services" (utilisee par l'onglet
+  // Outils de developpement > Actions de HA lui-meme) -- aucune commande
+  // maison necessaire pour cette partie.
+  async _renderEntityInfo(content, entity) {
+    const state = this._hass.states[entity.entity_id];
+    const attrs = (state && state.attributes) || {};
+    const attrKeys = Object.keys(attrs).filter((k) => k !== "friendly_name");
+
+    content.innerHTML = `
+      <div class="card">
+        <h2>${escapeHtml(entity.name)}</h2>
+        <div class="kv-row"><div class="k">Entity ID</div><div>${escapeHtml(entity.entity_id)}</div></div>
+        <div class="kv-row"><div class="k">Domaine</div><div>${escapeHtml(entity.domain)}</div></div>
+        <div class="kv-row"><div class="k">Pièce</div><div>${escapeHtml(entity.area || "non assignée")}</div></div>
+        <div class="kv-row"><div class="k">État actuel</div><div>${state ? escapeHtml(state.state) : "indisponible"}</div></div>
+      </div>
+
+      <div class="card">
+        <h2>Attributs</h2>
+        ${
+          attrKeys.length
+            ? attrKeys
+                .map(
+                  (k) => `
+              <div class="kv-row"><div class="k">${escapeHtml(k)}</div><div style="word-break:break-word;">${escapeHtml(JSON.stringify(attrs[k]))}</div></div>`
+                )
+                .join("")
+            : `<div class="empty">Aucun attribut.</div>`
+        }
+      </div>
+
+      <div class="card" id="actions-card">
+        <h2>Actions possibles</h2>
+        <div class="empty">Chargement…</div>
+      </div>
+    `;
+
+    const actionsCard = content.querySelector("#actions-card");
+    try {
+      if (!this._servicesCache) {
+        this._servicesCache = await this._hass.callWS({ type: "get_services" });
+      }
+      // Si l'utilisateur a change de selection pendant le chargement, ne
+      // pas ecraser l'affichage d'une autre entite entre-temps.
+      if (this._selected !== entity.entity_id || this._activeView !== "info") return;
+
+      const domainServices = (this._servicesCache && this._servicesCache[entity.domain]) || {};
+      const names = Object.keys(domainServices).sort();
+      if (!names.length) {
+        actionsCard.innerHTML = `<h2>Actions possibles</h2><div class="empty">Aucune action connue pour le domaine « ${escapeHtml(entity.domain)} ».</div>`;
+        return;
+      }
+      actionsCard.innerHTML = `
+        <h2>Actions possibles (${escapeHtml(entity.domain)}.*)</h2>
+        <div class="ref-list">
+          ${names
+            .map((name) => {
+              const svc = domainServices[name] || {};
+              const fieldNames = Object.keys(svc.fields || {});
+              return `
+                <div class="ref-item" style="flex-direction:column;align-items:flex-start;gap:4px;">
+                  <span class="badge">${escapeHtml(entity.domain)}.${escapeHtml(name)}</span>
+                  ${svc.description ? `<div style="color:var(--secondary-text-color);">${escapeHtml(svc.description)}</div>` : ""}
+                  ${fieldNames.length ? `<div style="font-size:12px;color:var(--secondary-text-color);">Paramètres : ${fieldNames.map((f) => escapeHtml(f)).join(", ")}</div>` : ""}
+                </div>`;
+            })
+            .join("")}
+        </div>
+      `;
+    } catch (err) {
+      if (this._selected !== entity.entity_id || this._activeView !== "info") return;
+      actionsCard.innerHTML = `<h2>Actions possibles</h2><div class="error">Erreur : ${escapeHtml((err && err.message) || String(err))}</div>`;
+    }
+  }
+
+  // --- Vue Automation Checker --------------------------------------------
+
+  _renderAutomationView() {
+    const el = this.shadowRoot.querySelector("#automation-content");
+    if (!el) return;
+
+    const automations = this._entities.filter((e) => e.domain === "automation" || e.domain === "script");
+
+    el.innerHTML = `
+      <div class="card">
+        <h2>Automation Checker</h2>
+        <div class="filters" style="margin-bottom:0;">
+          <select id="automation-select">
+            <option value="">— choisir une automatisation/un script —</option>
+            ${automations
+              .map(
+                (a) =>
+                  `<option value="${escapeHtml(a.entity_id)}" ${a.entity_id === this._automationSelected ? "selected" : ""}>${escapeHtml(a.name)}</option>`
+              )
+              .join("")}
+          </select>
+        </div>
+      </div>
+      <div id="graph-section"></div>
+    `;
+
+    this.shadowRoot.querySelector("#automation-select").addEventListener("change", (ev) => {
+      if (ev.target.value) {
+        this._loadAutomationGraph(ev.target.value);
+      } else {
+        this._automationSelected = null;
+        this._automationGraph = null;
+        const section = this.shadowRoot.querySelector("#graph-section");
+        if (section) section.innerHTML = "";
+      }
+    });
+
+    if (this._automationSelected && this._automationGraph) {
+      this._renderGraphSection();
+    }
+  }
+
+  async _loadAutomationGraph(entityId) {
+    this._automationSelected = entityId;
+    this._automationGraph = null;
+    this._simulationResult = null;
+    this._stateOverrides = {};
+    const section = this.shadowRoot.querySelector("#graph-section");
+    if (section) section.innerHTML = `<div class="card"><div class="empty">Chargement…</div></div>`;
+
+    try {
+      const result = await this._hass.callWS({ type: "alex_entitymap_studio/get_automation_graph", entity_id: entityId });
+      if (this._automationSelected !== entityId) return; // selection changee entre-temps
+      this._automationGraph = result;
+      this._nodePositions = layoutGraph(result.nodes, result.edges, result.trigger_ids);
+      this._graphPan = { x: 0, y: 0 };
+      this._graphZoom = 1;
+      this._selectedTriggerId = result.trigger_ids[0] || null;
+      this._renderGraphSection();
+    } catch (err) {
+      if (this._automationSelected !== entityId) return;
+      const message = (err && err.message) || String(err);
+      if (section) {
+        section.innerHTML = `<div class="card"><div class="error">Impossible de construire le graphe : ${escapeHtml(message)}</div></div>`;
+      }
+    }
+  }
+
+  _renderGraphSection() {
+    const section = this.shadowRoot.querySelector("#graph-section");
+    if (!section || !this._automationGraph) return;
+    const g = this._automationGraph;
+
+    section.innerHTML = `
+      <div class="card">
+        <h2>Graphe</h2>
+        <div id="graph-wrap">
+          <svg id="automation-graph-svg" viewBox="0 0 900 560" width="100%" height="560"></svg>
+        </div>
+        <div class="hint">Molette pour zoomer, glisser le fond pour déplacer la vue, glisser un nœud pour le repositionner.</div>
+      </div>
+
+      <div class="card">
+        <h2>Simuler l'exécution</h2>
+        <div class="row" style="display:flex;gap:8px;align-items:center;margin-bottom:10px;">
+          <label style="flex:0 0 100px;">Déclencheur</label>
+          <select id="trigger-select" style="flex:1;">
+            ${g.trigger_ids
+              .map((tid) => {
+                const n = g.nodes.find((x) => x.id === tid);
+                return `<option value="${tid}" ${tid === this._selectedTriggerId ? "selected" : ""}>${escapeHtml(n ? n.label : tid)}</option>`;
+              })
+              .join("")}
+          </select>
+        </div>
+        <div id="overrides-form"></div>
+        <button class="btn btn-outline" id="simulate-btn" style="margin-top:8px;">Simuler</button>
+        <div id="simulation-result" style="margin-top:12px;"></div>
+      </div>
+    `;
+
+    this.shadowRoot.querySelector("#trigger-select").addEventListener("change", (ev) => {
+      this._selectedTriggerId = ev.target.value;
+    });
+    this.shadowRoot.querySelector("#simulate-btn").addEventListener("click", () => this._runSimulation());
+
+    this._renderOverridesForm();
+    this._renderGraphSvg();
+    this._wireGraphInteractions();
+  }
+
+  _renderOverridesForm() {
+    const form = this.shadowRoot.querySelector("#overrides-form");
+    if (!form || !this._automationGraph) return;
+    const entities = this._automationGraph.condition_entities || [];
+    if (!entities.length) {
+      form.innerHTML = `<div class="hint">Aucune condition dans cette automatisation/ce script — rien à forcer.</div>`;
+      return;
+    }
+    form.innerHTML = `
+      <div class="hint" style="margin-bottom:6px;">États forcés pour la simulation (laisse vide pour utiliser l'état réel actuel) :</div>
+      ${entities
+        .map((eid) => {
+          const st = this._hass.states[eid];
+          const real = st ? st.state : "?";
+          const forced = this._stateOverrides[eid] || "";
+          return `
+            <div class="row" style="display:flex;gap:8px;align-items:center;margin-bottom:6px;">
+              <label style="flex:0 0 200px;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(eid)}">${escapeHtml(eid)}</label>
+              <input type="text" class="override-input" data-entity-id="${escapeHtml(eid)}" placeholder="réel : ${escapeHtml(real)}" value="${escapeHtml(forced)}" style="flex:1;" />
+            </div>`;
+        })
+        .join("")}
+    `;
+    form.querySelectorAll(".override-input").forEach((input) => {
+      input.addEventListener("input", (ev) => {
+        const eid = ev.target.getAttribute("data-entity-id");
+        if (ev.target.value.trim()) {
+          this._stateOverrides[eid] = ev.target.value.trim();
+        } else {
+          delete this._stateOverrides[eid];
+        }
+      });
+    });
+  }
+
+  _renderGraphSvg() {
+    const svg = this.shadowRoot.querySelector("#automation-graph-svg");
+    if (!svg || !this._automationGraph) return;
+    const g = this._automationGraph;
+    const sim = this._simulationResult;
+    const visitedSet = new Set(sim ? sim.visited_node_ids : []);
+    const takenSet = new Set(sim ? sim.taken_edges.map((e) => `${e.source}|${e.target}`) : []);
+
+    const edgesHtml = g.edges
+      .map((e) => {
+        const p1 = this._nodePositions[e.source] || { x: 0, y: 0 };
+        const p2 = this._nodePositions[e.target] || { x: 0, y: 0 };
+        const x1 = p1.x + NODE_W / 2;
+        const y1 = p1.y + NODE_H;
+        const x2 = p2.x + NODE_W / 2;
+        const y2 = p2.y;
+        const midX = (x1 + x2) / 2;
+        const midY = (y1 + y2) / 2;
+        const isTaken = takenSet.has(`${e.source}|${e.target}`);
+        const shortLabel = e.label ? (e.label.length > 16 ? e.label.slice(0, 15) + "…" : e.label) : "";
+        return `
+          <g>
+            <path class="graph-edge ${isTaken ? "taken" : ""}" d="M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}" marker-end="url(#arrow)" />
+            ${
+              shortLabel
+                ? `<rect x="${midX - shortLabel.length * 3.2 - 6}" y="${midY - 9}" width="${shortLabel.length * 6.4 + 12}" height="16" fill="rgba(0,0,0,0.65)" rx="4" />
+                   <text class="graph-edge-label" x="${midX}" y="${midY + 3}" text-anchor="middle">${escapeHtml(shortLabel)}</text>`
+                : ""
+            }
+          </g>`;
+      })
+      .join("");
+
+    const nodesHtml = g.nodes
+      .map((n) => {
+        const p = this._nodePositions[n.id] || { x: 0, y: 0 };
+        const color = NODE_KIND_COLORS[n.kind] || "#757575";
+        const isVisited = visitedSet.has(n.id);
+        const dimmed = sim && !isVisited;
+        const label = n.label.length > 34 ? n.label.slice(0, 33) + "…" : n.label;
+        return `
+          <g class="graph-node ${isVisited ? "visited" : ""}" data-node-id="${n.id}" transform="translate(${p.x},${p.y})">
+            <rect width="${NODE_W}" height="${NODE_H}" rx="10" fill="${color}" opacity="${dimmed ? 0.3 : 1}" />
+            <text x="${NODE_W / 2}" y="${NODE_H / 2 + 4}" text-anchor="middle">${escapeHtml(label)}</text>
+          </g>`;
+      })
+      .join("");
+
+    svg.innerHTML = `
+      <defs>
+        <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0,0 L8,4 L0,8 Z" fill="rgba(255,255,255,.5)" />
+        </marker>
+      </defs>
+      <g id="graph-viewport" transform="translate(${this._graphPan.x},${this._graphPan.y}) scale(${this._graphZoom})">
+        ${edgesHtml}
+        ${nodesHtml}
+      </g>
+    `;
+
+    svg.querySelectorAll(".graph-node").forEach((elNode) => {
+      elNode.addEventListener("pointerdown", (ev) => this._onNodePointerDown(ev, elNode.getAttribute("data-node-id")));
+    });
+  }
+
+  _wireGraphInteractions() {
+    const svg = this.shadowRoot.querySelector("#automation-graph-svg");
+    if (!svg) return;
+
+    svg.addEventListener("wheel", (ev) => {
+      ev.preventDefault();
+      const factor = ev.deltaY > 0 ? 0.9 : 1.1;
+      this._graphZoom = Math.max(0.3, Math.min(3, this._graphZoom * factor));
+      this._renderGraphSvg();
+    });
+
+    svg.addEventListener("pointerdown", (ev) => {
+      if (ev.target.closest(".graph-node")) return; // gere par _onNodePointerDown
+      this._graphPanning = true;
+      this._panStart = { x: ev.clientX, y: ev.clientY, panX: this._graphPan.x, panY: this._graphPan.y };
+      svg.classList.add("panning");
+    });
+
+    svg.addEventListener("pointermove", (ev) => {
+      if (this._graphDragNode) {
+        const p = this._svgPointFromEvent(svg, ev);
+        this._nodePositions[this._graphDragNode] = { x: p.x - NODE_W / 2, y: p.y - NODE_H / 2 };
+        this._renderGraphSvg();
+        return;
+      }
+      if (this._graphPanning) {
+        this._graphPan = {
+          x: this._panStart.panX + (ev.clientX - this._panStart.x),
+          y: this._panStart.panY + (ev.clientY - this._panStart.y),
+        };
+        this._renderGraphSvg();
+      }
+    });
+
+    const endInteraction = () => {
+      this._graphPanning = false;
+      this._graphDragNode = null;
+      svg.classList.remove("panning");
+    };
+    svg.addEventListener("pointerup", endInteraction);
+    svg.addEventListener("pointerleave", endInteraction);
+  }
+
+  _onNodePointerDown(ev, nodeId) {
+    ev.stopPropagation();
+    this._graphDragNode = nodeId;
+  }
+
+  // Conversion coordonnees ecran -> espace "logique" du graphe : passe par
+  // l'espace utilisateur du SVG (avant transform), puis soustrait le pan et
+  // divise par le zoom deja appliques au groupe <g id="graph-viewport">,
+  // pour retomber dans le meme repere que _nodePositions.
+  _svgPointFromEvent(svg, ev) {
+    const pt = svg.createSVGPoint();
+    pt.x = ev.clientX;
+    pt.y = ev.clientY;
+    const ctm = svg.getScreenCTM();
+    if (!ctm) return { x: 0, y: 0 };
+    const svgPoint = pt.matrixTransform(ctm.inverse());
+    return {
+      x: (svgPoint.x - this._graphPan.x) / this._graphZoom,
+      y: (svgPoint.y - this._graphPan.y) / this._graphZoom,
+    };
+  }
+
+  async _runSimulation() {
+    if (!this._automationGraph || !this._selectedTriggerId) return;
+    const btn = this.shadowRoot.querySelector("#simulate-btn");
+    const resultEl = this.shadowRoot.querySelector("#simulation-result");
+    if (btn) btn.textContent = "Simulation en cours…";
+    try {
+      const result = await this._hass.callWS({
+        type: "alex_entitymap_studio/simulate_automation",
+        entity_id: this._automationSelected,
+        trigger_id: this._selectedTriggerId,
+        overrides: { ...this._stateOverrides },
+      });
+      this._simulationResult = result;
+      this._renderGraphSvg();
+      if (resultEl) {
+        const reasonLabels = {
+          condition_false: "Simulation arrêtée : une condition n'est pas remplie.",
+          undetermined: "Simulation interrompue : impossible de déterminer une condition (état inconnu, ou construction non prise en charge dans cette version — templates Jinja bruts, repeat/parallel/wait_for_trigger).",
+          end_of_branch: "Simulation terminée normalement, en fin de séquence.",
+        };
+        const reasonText = reasonLabels[result.stopped_reason] || "Simulation terminée.";
+        resultEl.innerHTML = `<div class="hint">${escapeHtml(reasonText)}</div>`;
+      }
+    } catch (err) {
+      if (resultEl) {
+        resultEl.innerHTML = `<div class="error">Échec de la simulation : ${escapeHtml((err && err.message) || String(err))}</div>`;
+      }
+    } finally {
+      if (btn) btn.textContent = "Simuler";
+    }
   }
 }
 

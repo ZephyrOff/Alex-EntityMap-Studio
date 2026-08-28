@@ -446,3 +446,42 @@ def build_entity_map(hass: HomeAssistant) -> list[EntityInfo]:
             )
         )
     return results
+
+
+def find_automation_or_script_config(hass: HomeAssistant, entity_id: str) -> dict | None:
+    """Localise la configuration YAML brute d'une automatisation ou d'un
+    script a partir de son entity_id -- pour la vue "Automation Checker"
+    (construction du graphe). Renvoie None si introuvable. Les
+    automatisations/scripts bases sur un blueprint sont volontairement
+    exclus (renvoie leur config telle quelle, AVEC la cle "use_blueprint"
+    encore presente, sans la resoudre) -- au dessus de nous de decider quoi
+    en faire (l'appelant peut le detecter et l'annoncer explicitement,
+    plutot qu'un graphe construit sur une sequence vide/trompeuse)."""
+    domain, _, object_id = entity_id.partition(".")
+    if domain not in ("automation", "script"):
+        return None
+
+    tree = _load_yaml_tree(hass)
+
+    if domain == "script":
+        section = tree.get("script") or {}
+        if not isinstance(section, dict):
+            return None
+        entry = section.get(object_id)
+        return entry if isinstance(entry, dict) else None
+
+    # automation : la section est une LISTE, il faut retrouver la bonne
+    # entree via l'id -- unique_id de l'entite = id: de la config YAML pour
+    # cette plateforme (meme mecanisme deja etabli et utilise ailleurs dans
+    # ce module pour la navigation).
+    registry = er.async_get(hass)
+    entry = registry.entities.get(entity_id)
+    if entry is None or not entry.unique_id:
+        return None
+    section = tree.get("automation") or []
+    if not isinstance(section, list):
+        return None
+    for item in section:
+        if isinstance(item, dict) and str(item.get("id")) == str(entry.unique_id):
+            return item
+    return None

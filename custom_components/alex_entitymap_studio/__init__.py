@@ -11,6 +11,11 @@ l'executor a chaque appel de la commande websocket -- pas de cache
 permanent pour l'instant : la configuration peut changer a tout moment
 (nouvelle automatisation, carte de dashboard ajoutee...) et la fraicheur du
 resultat importe plus que la vitesse pour cet outil d'exploration ponctuelle.
+
+Vue "Automation Checker" (automation_graph.py) : transforme une
+automatisation/un script en graphe, puis simule son execution depuis un
+declencheur choisi -- avec des etats EVENTUELLEMENT forces par
+l'utilisateur, jamais d'appel a un service reel.
 """
 from __future__ import annotations
 
@@ -24,7 +29,7 @@ from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from . import scanner
+from . import automation_graph, scanner
 from .const import DOMAIN, PANEL_ICON, PANEL_TITLE, PANEL_URL_PATH
 
 _LOGGER = logging.getLogger(__name__)
@@ -36,6 +41,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     if not hass.data[DOMAIN].get("ws_registered"):
         websocket_api.async_register_command(hass, websocket_get_map)
+        websocket_api.async_register_command(hass, websocket_get_automation_graph)
+        websocket_api.async_register_command(hass, websocket_simulate_automation)
         hass.data[DOMAIN]["ws_registered"] = True
 
     await _async_register_panel(hass)
@@ -55,6 +62,114 @@ async def websocket_get_map(hass: HomeAssistant, connection, msg) -> None:
         return
 
     connection.send_result(msg["id"], {"entities": [asdict(e) for e in entities]})
+
+
+GET_AUTOMATION_GRAPH_SCHEMA = {
+    vol.Required("type"): f"{DOMAIN}/get_automation_graph",
+    vol.Required("entity_id"): str,
+}
+
+
+@websocket_api.websocket_command(GET_AUTOMATION_GRAPH_SCHEMA)
+@websocket_api.async_response
+async def websocket_get_automation_graph(hass: HomeAssistant, connection, msg) -> None:
+    """Construit le graphe d'une automatisation/d'un script -- lecture
+    seule, aucun effet de bord. Les automatisations/scripts bases sur un
+    blueprint sont explicitement signales comme non supportes plutot que de
+    construire un graphe vide ou trompeur."""
+    entity_id = msg["entity_id"]
+    try:
+        config = await hass.async_add_executor_job(scanner.find_automation_or_script_config, hass, entity_id)
+    except Exception as exc:  # noqa: BLE001 - ne jamais planter la commande websocket
+        _LOGGER.exception("Echec de la localisation de la config pour %s", entity_id)
+        connection.send_error(msg["id"], "scan_failed", str(exc))
+        return
+
+    if config is None:
+        connection.send_error(msg["id"], "not_found", "Automatisation ou script introuvable dans la configuration YAML.")
+        return
+    if "use_blueprint" in config:
+        connection.send_error(
+            msg["id"],
+            "blueprint_not_supported",
+            "Cette automatisation/ce script utilise un blueprint -- non supporté pour le graphe dans cette version.",
+        )
+        return
+
+    try:
+        graph = automation_graph.parse_to_graph(config)
+    except Exception as exc:  # noqa: BLE001
+        _LOGGER.exception("Echec de la construction du graphe pour %s", entity_id)
+        connection.send_error(msg["id"], "parse_failed", str(exc))
+        return
+
+    connection.send_result(
+        msg["id"],
+        {
+            "nodes": [asdict(n) for n in graph.nodes],
+            "edges": [asdict(e) for e in graph.edges],
+            "trigger_ids": graph.trigger_ids,
+            "condition_entities": automation_graph.referenced_entities_in_conditions(graph),
+        },
+    )
+
+
+SIMULATE_AUTOMATION_SCHEMA = {
+    vol.Required("type"): f"{DOMAIN}/simulate_automation",
+    vol.Required("entity_id"): str,
+    vol.Required("trigger_id"): str,
+    vol.Optional("overrides", default=dict): {str: str},
+}
+
+
+@websocket_api.websocket_command(SIMULATE_AUTOMATION_SCHEMA)
+@websocket_api.async_response
+async def websocket_simulate_automation(hass: HomeAssistant, connection, msg) -> None:
+    """Simule l'execution depuis un declencheur choisi -- les etats forces
+    par l'utilisateur (`overrides`) priment sur les vrais etats actuels,
+    utilises seulement en repli pour les entites non forcees. N'appelle
+    JAMAIS aucun service : se contente de determiner le chemin qui SERAIT
+    emprunte."""
+    entity_id = msg["entity_id"]
+    try:
+        config = await hass.async_add_executor_job(scanner.find_automation_or_script_config, hass, entity_id)
+    except Exception as exc:  # noqa: BLE001
+        _LOGGER.exception("Echec de la localisation de la config pour %s", entity_id)
+        connection.send_error(msg["id"], "scan_failed", str(exc))
+        return
+
+    if config is None or "use_blueprint" in config:
+        connection.send_error(msg["id"], "not_found", "Introuvable, ou basé sur un blueprint (non supporté).")
+        return
+
+    try:
+        graph = automation_graph.parse_to_graph(config)
+    except Exception as exc:  # noqa: BLE001
+        _LOGGER.exception("Echec de la construction du graphe pour %s", entity_id)
+        connection.send_error(msg["id"], "parse_failed", str(exc))
+        return
+
+    overrides = msg.get("overrides") or {}
+
+    def get_state(target_entity_id: str) -> automation_graph.StateSnapshot | None:
+        if target_entity_id in overrides:
+            return automation_graph.StateSnapshot(state=overrides[target_entity_id])
+        real = hass.states.get(target_entity_id)
+        if real is None:
+            return None
+        return automation_graph.StateSnapshot(state=real.state, attributes=dict(real.attributes))
+
+    result = automation_graph.simulate_from_trigger(graph, msg["trigger_id"], get_state)
+
+    connection.send_result(
+        msg["id"],
+        {
+            "visited_node_ids": result.visited_node_ids,
+            "taken_edges": [{"source": s, "target": t} for s, t in result.taken_edges],
+            "undetermined_at": result.undetermined_at,
+            "stopped_reason": result.stopped_reason,
+        },
+    )
 
 
 async def _async_register_panel(hass: HomeAssistant) -> None:

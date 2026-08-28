@@ -1,9 +1,21 @@
 # Alex EntityMap Studio
 
 Intégration Home Assistant (panel dédié dans la barre latérale) pour explorer
-tes entités : pièce, dernière utilisation, dépendances (ce qu'un
-script/une automatisation utilise), et **appelants** — qui référence cette
-entité, à travers automatisations, scripts, et dashboards.
+tes entités, avec trois vues accessibles depuis l'en-tête :
+
+- **Entity Checker** — pièce, dernière utilisation, dépendances (ce qu'un
+  script/une automatisation utilise), et **appelants** — qui référence cette
+  entité, à travers automatisations, scripts, et dashboards.
+- **Entity Info** — recherche une entité, vois son état et ses attributs en
+  direct, et surtout les **actions possibles** sur son domaine (ex. pour une
+  `light` : `light.turn_on`, `light.turn_off`, `light.toggle`...), avec leur
+  description et leurs paramètres.
+- **Automation Checker** — en cours de conception (voir plus bas).
+
+La liste d'entités dans la barre latérale (filtre par domaine + recherche
+texte) est **partagée** entre Entity Checker et Entity Info — sélectionner
+une entité l'affiche dans la vue active, pas besoin de la rechercher deux
+fois.
 
 ## Pourquoi une intégration plutôt qu'un simple outil de recherche texte
 
@@ -98,6 +110,41 @@ Les entrées de « Dépendances » et « Appelants » sont cliquables :
 
 Sans correspondance résolue (alias/id introuvable dans le registre), l'entrée
 reste affichée mais non cliquable, plutôt que de naviguer au mauvais endroit.
+
+## Automation Checker
+
+Choisis une automatisation ou un script dans le menu déroulant pour voir son
+**graphe** (déclencheurs → conditions → actions, branches `if`/`choose`
+comprises) : molette pour zoomer, glisser le fond pour déplacer la vue,
+glisser un nœud pour le repositionner.
+
+**Simulation** — choisis un déclencheur, force éventuellement l'état de
+certaines entités (celles utilisées dans les conditions du graphe sont
+proposées automatiquement, avec l'état réel actuel affiché en indication),
+puis clique sur « Simuler » : le chemin réellement emprunté s'illumine en
+jaune sur le graphe, les nœuds non atteints s'estompent. **Aucun service
+n'est jamais appelé** — la simulation se contente de déterminer, par le
+calcul, quel chemin serait suivi.
+
+Ce qui est couvert par le moteur d'évaluation : conditions `state`,
+`numeric_state`, `and`/`or`/`not`, imbriquées à volonté. Ce qui ne l'est
+**pas** dans cette version, annoncé comme tel plutôt que deviné
+silencieusement :
+- Les conditions par **template Jinja brut** — la simulation s'arrête avec
+  « indéterminé » plutôt que d'inventer un résultat.
+- `repeat`, `parallel`, `wait_for_trigger` — représentés comme un nœud
+  unique non détaillé dans le graphe, pas déployés en sous-étapes.
+- Les automatisations/scripts basés sur un **blueprint** — signalés
+  explicitement comme non supportés pour cette vue.
+
+## Entity Info — actions possibles
+
+Les actions listées viennent de la commande WebSocket **native** de Home
+Assistant `get_services` (la même que celle utilisée par Outils de
+développement → Actions dans l'interface officielle) — aucune commande
+propre à cette intégration n'a été nécessaire pour ça. L'état et les
+attributs affichés sont lus en direct côté panel (`hass.states`), sans
+aller-retour serveur supplémentaire.
 
 ## Non couvert (pour l'instant)
 
