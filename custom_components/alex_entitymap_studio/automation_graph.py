@@ -53,14 +53,28 @@ def _truncate(text: str, length: int = 60) -> str:
 
 # ---------------------------------------------------------------------------
 # Descriptions lisibles -- transforment une etape YAML brute en texte
-# comprehensible, pour l'affichage dans le graphe.
+# comprehensible, pour l'affichage dans le graphe. `names` (optionnel) est un
+# dictionnaire {entity_id ou device_id: nom convivial reel} -- sans lui, on
+# retombe sur l'identifiant brut (utile pour les tests, ou une entite
+# desormais supprimee). Jamais construit ici (module independant de HA) :
+# fourni par l'appelant (cote integration, a partir de hass.states / du
+# registre des appareils).
 # ---------------------------------------------------------------------------
-def describe_trigger(trig: dict) -> str:
+def _label(id_: str | None, names: dict[str, str] | None) -> str:
+    if not id_:
+        return "?"
+    return (names or {}).get(id_, id_)
+
+
+def _labels(ids, names: dict[str, str] | None) -> str:
+    ids = ids if isinstance(ids, list) else [ids]
+    return ", ".join(_label(i, names) for i in ids if i)
+
+
+def describe_trigger(trig: dict, names: dict[str, str] | None = None) -> str:
     platform = trig.get("platform") or trig.get("trigger") or "?"
     if platform == "state":
-        entities = trig.get("entity_id")
-        entities = entities if isinstance(entities, list) else [entities]
-        entities_str = ", ".join(str(e) for e in entities if e)
+        entities_str = _labels(trig.get("entity_id"), names)
         to_state = trig.get("to")
         from_state = trig.get("from")
         if to_state is not None and from_state is not None:
@@ -69,8 +83,7 @@ def describe_trigger(trig: dict) -> str:
             return f"État de {entities_str} devient {to_state}"
         return f"Changement d'état de {entities_str}"
     if platform == "numeric_state":
-        entities = trig.get("entity_id")
-        entities_str = ", ".join(entities) if isinstance(entities, list) else str(entities)
+        entities_str = _labels(trig.get("entity_id"), names)
         above = trig.get("above")
         below = trig.get("below")
         if above is not None and below is not None:
@@ -80,6 +93,21 @@ def describe_trigger(trig: dict) -> str:
         if below is not None:
             return f"{entities_str} < {below}"
         return f"Valeur numérique de {entities_str}"
+    if platform == "device":
+        # Declencheur "Appareil" -- device_id est un identifiant technique
+        # (long hexadecimal). Quand entity_id est present (frequent sur ce
+        # type de declencheur), il suffit a lui seul pour un affichage
+        # comprehensible -- ajouter le device_id en plus n'apportait rien et
+        # faisait fuiter l'identifiant brut des que l'appareil lui-meme
+        # n'etait pas dans `names` (meme quand l'entite, elle, l'etait).
+        # Le device_id n'est utilise en dernier recours que s'il n'y a
+        # aucun entity_id du tout.
+        entity_id = trig.get("entity_id")
+        trig_type = trig.get("type") or trig.get("subtype") or ""
+        if entity_id:
+            return f"{_label(entity_id, names)}" + (f" : {trig_type}" if trig_type else "")
+        device_label = _label(trig.get("device_id"), names)
+        return f"Appareil « {device_label} »" + (f" : {trig_type}" if trig_type else "")
     if platform == "time":
         return f"À {trig.get('at', '?')}"
     if platform == "sun":
@@ -97,7 +125,7 @@ def describe_trigger(trig: dict) -> str:
     return f"Déclencheur « {platform} »"
 
 
-def _describe_single_condition(cond) -> str:
+def _describe_single_condition(cond, names: dict[str, str] | None = None) -> str:
     if isinstance(cond, str):
         # Raccourci Jinja pur (une chaine de template directement comme condition).
         return f"Modèle : {_truncate(cond)}"
@@ -105,14 +133,12 @@ def _describe_single_condition(cond) -> str:
         return "Condition"
     ctype = cond.get("condition", "?")
     if ctype == "state":
-        entities = cond.get("entity_id")
-        entities_str = ", ".join(entities) if isinstance(entities, list) else str(entities)
+        entities_str = _labels(cond.get("entity_id"), names)
         state = cond.get("state")
         state_str = ", ".join(state) if isinstance(state, list) else str(state)
         return f"{entities_str} est {state_str}"
     if ctype == "numeric_state":
-        entities = cond.get("entity_id")
-        entities_str = ", ".join(entities) if isinstance(entities, list) else str(entities)
+        entities_str = _labels(cond.get("entity_id"), names)
         above = cond.get("above")
         below = cond.get("below")
         if above is not None and below is not None:
@@ -122,6 +148,11 @@ def _describe_single_condition(cond) -> str:
         if below is not None:
             return f"{entities_str} < {below}"
         return f"Valeur numérique de {entities_str}"
+    if ctype == "device":
+        entity_id = cond.get("entity_id")
+        if entity_id:
+            return _label(entity_id, names)
+        return f"Appareil « {_label(cond.get('device_id'), names)} »"
     if ctype == "template":
         return f"Modèle : {_truncate(cond.get('value_template', ''))}"
     if ctype == "time":
@@ -135,21 +166,21 @@ def _describe_single_condition(cond) -> str:
             return f"Il est avant {before}"
         return "Condition horaire"
     if ctype == "and":
-        return " ET ".join(_describe_single_condition(c) for c in cond.get("conditions", []))
+        return " ET ".join(_describe_single_condition(c, names) for c in cond.get("conditions", []))
     if ctype == "or":
-        return " OU ".join(_describe_single_condition(c) for c in cond.get("conditions", []))
+        return " OU ".join(_describe_single_condition(c, names) for c in cond.get("conditions", []))
     if ctype == "not":
-        return "NON (" + " ET ".join(_describe_single_condition(c) for c in cond.get("conditions", [])) + ")"
+        return "NON (" + " ET ".join(_describe_single_condition(c, names) for c in cond.get("conditions", [])) + ")"
     return f"Condition « {ctype} »"
 
 
-def describe_condition_list(conditions) -> str:
+def describe_condition_list(conditions, names: dict[str, str] | None = None) -> str:
     if isinstance(conditions, (str, dict)):
         conditions = [conditions]
-    return " ET ".join(_describe_single_condition(c) for c in conditions)
+    return " ET ".join(_describe_single_condition(c, names) for c in conditions)
 
 
-def describe_action_step(step: dict) -> tuple[str, str]:
+def describe_action_step(step: dict, names: dict[str, str] | None = None) -> tuple[str, str]:
     """Renvoie (kind, label) pour une etape d'action simple (pas if/choose/
     condition, deja geres a part par le parseur)."""
     if "delay" in step:
@@ -167,14 +198,20 @@ def describe_action_step(step: dict) -> tuple[str, str]:
     if "event" in step:
         return "action", f"Émettre l'événement « {step['event']} »"
     if "scene" in step:
-        return "action", f"Activer la scène {step['scene']}"
+        return "action", f"Activer la scène {_label(step['scene'], names)}"
+    if "device_id" in step and ("domain" in step or "type" in step):
+        # Action de type "Appareil" (choisie via l'onglet Appareil de
+        # l'editeur HA plutot que Service) -- meme logique que pour les
+        # declencheurs/conditions du meme type.
+        entity_id = step.get("entity_id")
+        label = _label(entity_id, names) if entity_id else f"Appareil « {_label(step.get('device_id'), names)} »"
+        return "action", label
     service = step.get("service") or step.get("action")
     if service:
         target = step.get("target", {})
         entity_id = target.get("entity_id") or step.get("entity_id")
         if entity_id:
-            entities_str = ", ".join(entity_id) if isinstance(entity_id, list) else str(entity_id)
-            return "action", f"{service} → {entities_str}"
+            return "action", f"{service} → {_labels(entity_id, names)}"
         return "action", str(service)
     return "opaque", "Étape non reconnue"
 
@@ -203,11 +240,13 @@ def _parse_sequence(
     edges: list[GraphEdge],
     idgen: _IdGen,
     incoming: list[tuple[str, str | None]],
+    names: dict[str, str] | None = None,
 ) -> list[tuple[str, str | None]]:
     """Parse une sequence d'etapes. `incoming` = liste de (node_id, label a
     utiliser pour l'arete) d'ou partir. Renvoie la meme forme en sortie --
     peut contenir plusieurs entrees si la derniere etape est un if/choose
-    (plusieurs chemins de sortie possibles)."""
+    (plusieurs chemins de sortie possibles). `names` : voir les fonctions
+    describe_* plus haut."""
     current = incoming
     for step in steps:
         if not isinstance(step, dict):
@@ -215,13 +254,13 @@ def _parse_sequence(
 
         if "if" in step:
             cond_id = idgen.next()
-            nodes.append(GraphNode(cond_id, "if", describe_condition_list(step["if"]), raw=step))
+            nodes.append(GraphNode(cond_id, "if", describe_condition_list(step["if"], names), raw=step))
             for prev_id, prev_label in current:
                 edges.append(GraphEdge(prev_id, cond_id, prev_label))
-            then_out = _parse_sequence(step.get("then", []), nodes, edges, idgen, [(cond_id, "vrai")])
+            then_out = _parse_sequence(step.get("then", []), nodes, edges, idgen, [(cond_id, "vrai")], names)
             else_steps = step.get("else", [])
             else_out = (
-                _parse_sequence(else_steps, nodes, edges, idgen, [(cond_id, "faux")])
+                _parse_sequence(else_steps, nodes, edges, idgen, [(cond_id, "faux")], names)
                 if else_steps
                 else [(cond_id, "faux")]
             )
@@ -235,13 +274,13 @@ def _parse_sequence(
                 edges.append(GraphEdge(prev_id, choose_id, prev_label))
             branch_out: list[tuple[str, str | None]] = []
             for i, option in enumerate(step["choose"]):
-                option_label = f"Option {i + 1} : {describe_condition_list(option.get('conditions', []))}"
+                option_label = f"Option {i + 1} : {describe_condition_list(option.get('conditions', []), names)}"
                 branch_out += _parse_sequence(
-                    option.get("sequence", []), nodes, edges, idgen, [(choose_id, option_label)]
+                    option.get("sequence", []), nodes, edges, idgen, [(choose_id, option_label)], names
                 )
             default_steps = step.get("default", [])
             branch_out += (
-                _parse_sequence(default_steps, nodes, edges, idgen, [(choose_id, "défaut")])
+                _parse_sequence(default_steps, nodes, edges, idgen, [(choose_id, "défaut")], names)
                 if default_steps
                 else [(choose_id, "défaut (rien)")]
             )
@@ -258,7 +297,7 @@ def _parse_sequence(
             # gere a part dans parse_to_graph) ou a l'interieur du
             # `conditions:` propre a un and/or.
             cond_id = idgen.next()
-            nodes.append(GraphNode(cond_id, "condition", _describe_single_condition(step), raw=step))
+            nodes.append(GraphNode(cond_id, "condition", _describe_single_condition(step, names), raw=step))
             for prev_id, prev_label in current:
                 edges.append(GraphEdge(prev_id, cond_id, prev_label))
             stop_id = idgen.next()
@@ -269,7 +308,7 @@ def _parse_sequence(
 
         # Action simple (ou construction opaque type repeat/parallel).
         action_id = idgen.next()
-        kind, label = describe_action_step(step)
+        kind, label = describe_action_step(step, names)
         nodes.append(GraphNode(action_id, kind, label, raw=step))
         for prev_id, prev_label in current:
             edges.append(GraphEdge(prev_id, action_id, prev_label))
@@ -278,10 +317,12 @@ def _parse_sequence(
     return current
 
 
-def parse_to_graph(config: dict) -> AutomationGraph:
+def parse_to_graph(config: dict, names: dict[str, str] | None = None) -> AutomationGraph:
     """Point d'entree principal : transforme la config d'une automatisation
     ou d'un script (deja resolue -- !include/blueprint geres en amont) en
-    graphe de noeuds/aretes."""
+    graphe de noeuds/aretes. `names` (optionnel) : {entity_id ou device_id:
+    nom convivial reel} pour un affichage lisible plutot que des
+    identifiants bruts -- voir les fonctions describe_* plus haut."""
     nodes: list[GraphNode] = []
     edges: list[GraphEdge] = []
     idgen = _IdGen()
@@ -294,7 +335,7 @@ def parse_to_graph(config: dict) -> AutomationGraph:
             continue
         tid = idgen.next()
         trigger_ids.append(tid)
-        nodes.append(GraphNode(tid, "trigger", describe_trigger(trig), raw=trig))
+        nodes.append(GraphNode(tid, "trigger", describe_trigger(trig, names), raw=trig))
         incoming.append((tid, None))
 
     # Script sans declencheur (appele directement) : point de depart unique
@@ -318,7 +359,7 @@ def parse_to_graph(config: dict) -> AutomationGraph:
             GraphNode(
                 cond_id,
                 "condition",
-                describe_condition_list(top_conditions),
+                describe_condition_list(top_conditions, names),
                 raw={"condition": "and", "conditions": _as_list(top_conditions)},
             )
         )
@@ -330,7 +371,7 @@ def parse_to_graph(config: dict) -> AutomationGraph:
         incoming = [(cond_id, "vrai")]
 
     actions = _as_list(config.get("action") or config.get("actions") or config.get("sequence"))
-    _parse_sequence(actions, nodes, edges, idgen, incoming)
+    _parse_sequence(actions, nodes, edges, idgen, incoming, names)
 
     return AutomationGraph(nodes=nodes, edges=edges, trigger_ids=trigger_ids)
 

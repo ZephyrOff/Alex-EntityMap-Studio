@@ -41,14 +41,30 @@ const SOURCE_TYPE_LABELS = {
   dashboard: "Dashboard",
 };
 
+// Palette deliberement eloignee des couleurs "materiel design" par defaut
+// (bleu/vert/rouge satures) -- tons plus doux inspires des teintes 300-400
+// de Tailwind, avec du texte sombre dessus (meilleur contraste que du blanc
+// sur ces tons clairs) pour un rendu plus sobre que des blocs satures.
 const NODE_KIND_COLORS = {
-  trigger: "#03a9f4",
-  condition: "#f4a935",
-  if: "#f4a935",
-  choose: "#9c27b0",
-  action: "#4caf50",
-  stop: "#e53935",
-  opaque: "#757575",
+  trigger: "#5eead4",
+  condition: "#fcd34d",
+  if: "#fcd34d",
+  choose: "#c4b5fd",
+  action: "#6ee7b7",
+  stop: "#fca5a5",
+  opaque: "#cbd5e1",
+};
+// Glyphes geometriques simples (bloc Unicode "Geometric Shapes", tres
+// largement supportes) plutot que des icones custom -- un symbole distinct
+// par role suffit a distinguer les noeuds d'un coup d'oeil, meme daltonien.
+const NODE_KIND_ICONS = {
+  trigger: "▶",
+  condition: "◆",
+  if: "◆",
+  choose: "✦",
+  action: "●",
+  stop: "■",
+  opaque: "○",
 };
 const NODE_W = 190;
 const NODE_H = 56;
@@ -181,6 +197,7 @@ class AlexEntityMapStudioPanel extends HTMLElement {
         .header {
           display: flex;
           align-items: center;
+          flex-wrap: wrap;
           gap: 12px;
           padding: 16px 24px;
           background: var(--app-header-background-color, var(--primary-color, #03a9f4));
@@ -208,17 +225,21 @@ class AlexEntityMapStudioPanel extends HTMLElement {
         .btn-outline { background: rgba(255,255,255,.12); color: white; }
         .btn-outline.active { background: white; color: var(--primary-color, #03a9f4); }
         #graph-wrap {
-          border: 1px solid var(--divider-color, #333); border-radius: 12px;
-          overflow: hidden; background: rgba(255,255,255,.02); touch-action: none;
+          border: 1px solid rgba(255,255,255,.08); border-radius: 14px;
+          overflow: hidden; background: #14171c; touch-action: none;
         }
         #automation-graph-svg { display: block; cursor: grab; }
         #automation-graph-svg.panning { cursor: grabbing; }
-        .graph-node rect { stroke: white; stroke-width: 1.5; cursor: grab; }
-        .graph-node text { fill: white; font-size: 12px; pointer-events: none; }
-        .graph-node.visited rect { stroke: #ffeb3b; stroke-width: 3; }
-        .graph-edge { stroke: rgba(255,255,255,.35); stroke-width: 2; fill: none; }
-        .graph-edge.taken { stroke: #ffeb3b; stroke-width: 3; }
-        .graph-edge-label { fill: var(--secondary-text-color); font-size: 10px; }
+        .graph-node rect {
+          stroke: rgba(255,255,255,.85); stroke-width: 1; cursor: grab;
+          filter: drop-shadow(0 3px 6px rgba(0,0,0,.35));
+        }
+        .graph-node .node-icon { font-size: 15px; fill: rgba(0,0,0,.55); }
+        .graph-node text.node-label { fill: rgba(0,0,0,.82); font-size: 11.5px; font-weight: 600; pointer-events: none; }
+        .graph-node.visited rect { stroke: #fff59d; stroke-width: 2.5; }
+        .graph-edge { stroke: rgba(255,255,255,.28); stroke-width: 2; fill: none; }
+        .graph-edge.taken { stroke: #ffd54f; stroke-width: 3; filter: drop-shadow(0 0 3px rgba(255,213,79,.5)); }
+        .graph-edge-label { fill: rgba(255,255,255,.75); font-size: 10px; }
         .layout { display: flex; height: calc(100% - 64px); }
         .sidebar {
           width: 340px; flex: 0 0 340px; overflow-y: auto;
@@ -245,9 +266,11 @@ class AlexEntityMapStudioPanel extends HTMLElement {
         .content { flex: 1; overflow-y: auto; padding: 20px 28px; }
         .card {
           background: var(--card-background-color, #1e1e1e);
+          border: 1px solid rgba(255,255,255,.06);
           border-radius: 16px; padding: 20px; margin-bottom: 18px;
+          box-shadow: 0 2px 10px rgba(0,0,0,.18);
         }
-        .card h2 { margin: 0 0 12px; font-size: 15px; font-weight: 600; }
+        .card h2 { margin: 0 0 14px; font-size: 15px; font-weight: 600; }
         .kv-row { display: flex; gap: 10px; padding: 6px 0; font-size: 13px; }
         .kv-row .k { flex: 0 0 140px; color: var(--secondary-text-color); }
         .ref-list { display: flex; flex-direction: column; gap: 8px; }
@@ -763,6 +786,14 @@ class AlexEntityMapStudioPanel extends HTMLElement {
         <div id="graph-wrap">
           <svg id="automation-graph-svg" viewBox="0 0 900 560" width="100%" height="560"></svg>
         </div>
+        <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;font-size:11px;color:var(--secondary-text-color);">
+          <span>▶ Déclencheur</span>
+          <span>◆ Condition</span>
+          <span>✦ Choix</span>
+          <span>● Action</span>
+          <span>■ Arrêt</span>
+          <span>○ Autre</span>
+        </div>
         <div class="hint">Molette pour zoomer, glisser le fond pour déplacer la vue, glisser un nœud pour le repositionner.</div>
       </div>
 
@@ -809,13 +840,15 @@ class AlexEntityMapStudioPanel extends HTMLElement {
         .map((eid) => {
           const st = this._hass.states[eid];
           const real = st ? st.state : "?";
+          const displayName = (st && st.attributes && st.attributes.friendly_name) || eid;
           const forced = this._stateOverrides[eid] || "";
           return `
             <div class="row" style="display:flex;gap:8px;align-items:center;margin-bottom:6px;">
-              <label style="flex:0 0 200px;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(eid)}">${escapeHtml(eid)}</label>
+              <label style="flex:0 0 200px;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeHtml(eid)}">${escapeHtml(displayName)}</label>
               <input type="text" class="override-input" data-entity-id="${escapeHtml(eid)}" placeholder="réel : ${escapeHtml(real)}" value="${escapeHtml(forced)}" style="flex:1;" />
             </div>`;
         })
+        .join("")}
         .join("")}
     `;
     form.querySelectorAll(".override-input").forEach((input) => {
@@ -866,24 +899,30 @@ class AlexEntityMapStudioPanel extends HTMLElement {
     const nodesHtml = g.nodes
       .map((n) => {
         const p = this._nodePositions[n.id] || { x: 0, y: 0 };
-        const color = NODE_KIND_COLORS[n.kind] || "#757575";
+        const color = NODE_KIND_COLORS[n.kind] || "#cbd5e1";
+        const icon = NODE_KIND_ICONS[n.kind] || "○";
         const isVisited = visitedSet.has(n.id);
         const dimmed = sim && !isVisited;
-        const label = n.label.length > 34 ? n.label.slice(0, 33) + "…" : n.label;
+        const label = n.label.length > 30 ? n.label.slice(0, 29) + "…" : n.label;
         return `
           <g class="graph-node ${isVisited ? "visited" : ""}" data-node-id="${n.id}" transform="translate(${p.x},${p.y})">
             <rect width="${NODE_W}" height="${NODE_H}" rx="10" fill="${color}" opacity="${dimmed ? 0.3 : 1}" />
-            <text x="${NODE_W / 2}" y="${NODE_H / 2 + 4}" text-anchor="middle">${escapeHtml(label)}</text>
+            <text class="node-icon" x="16" y="${NODE_H / 2 + 5}" text-anchor="middle">${icon}</text>
+            <text class="node-label" x="34" y="${NODE_H / 2 + 4}">${escapeHtml(label)}</text>
           </g>`;
       })
       .join("");
 
     svg.innerHTML = `
       <defs>
+        <pattern id="graph-grid" width="24" height="24" patternUnits="userSpaceOnUse">
+          <circle cx="1" cy="1" r="1" fill="rgba(255,255,255,.06)" />
+        </pattern>
         <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
-          <path d="M0,0 L8,4 L0,8 Z" fill="rgba(255,255,255,.5)" />
+          <path d="M0,0 L8,4 L0,8 Z" fill="rgba(255,255,255,.45)" />
         </marker>
       </defs>
+      <rect x="0" y="0" width="900" height="560" fill="url(#graph-grid)" />
       <g id="graph-viewport" transform="translate(${this._graphPan.x},${this._graphPan.y}) scale(${this._graphZoom})">
         ${edgesHtml}
         ${nodesHtml}

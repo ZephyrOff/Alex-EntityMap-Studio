@@ -28,6 +28,7 @@ from homeassistant.components import panel_custom, websocket_api
 from homeassistant.components.http import StaticPathConfig
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 
 from . import automation_graph, scanner
 from .const import DOMAIN, PANEL_ICON, PANEL_TITLE, PANEL_URL_PATH
@@ -64,6 +65,26 @@ async def websocket_get_map(hass: HomeAssistant, connection, msg) -> None:
     connection.send_result(msg["id"], {"entities": [asdict(e) for e in entities]})
 
 
+def _build_names_lookup(hass: HomeAssistant) -> dict[str, str]:
+    """Construit {entity_id ou device_id: nom convivial reel}, pour un
+    affichage lisible dans le graphe plutot que des identifiants bruts --
+    voir automation_graph.py. Calcule a chaque appel (pas de cache) : les
+    noms peuvent changer, et le cout reste negligeable pour un outil
+    d'exploration ponctuelle, meme principe que le reste de cette
+    integration."""
+    names: dict[str, str] = {}
+    for state in hass.states.async_all():
+        friendly = state.attributes.get("friendly_name")
+        if friendly:
+            names[state.entity_id] = friendly
+    device_reg = dr.async_get(hass)
+    for device in device_reg.devices.values():
+        label = device.name_by_user or device.name
+        if label:
+            names[device.id] = label
+    return names
+
+
 GET_AUTOMATION_GRAPH_SCHEMA = {
     vol.Required("type"): f"{DOMAIN}/get_automation_graph",
     vol.Required("entity_id"): str,
@@ -97,7 +118,8 @@ async def websocket_get_automation_graph(hass: HomeAssistant, connection, msg) -
         return
 
     try:
-        graph = automation_graph.parse_to_graph(config)
+        names = _build_names_lookup(hass)
+        graph = automation_graph.parse_to_graph(config, names=names)
     except Exception as exc:  # noqa: BLE001
         _LOGGER.exception("Echec de la construction du graphe pour %s", entity_id)
         connection.send_error(msg["id"], "parse_failed", str(exc))
@@ -143,7 +165,8 @@ async def websocket_simulate_automation(hass: HomeAssistant, connection, msg) ->
         return
 
     try:
-        graph = automation_graph.parse_to_graph(config)
+        names = _build_names_lookup(hass)
+        graph = automation_graph.parse_to_graph(config, names=names)
     except Exception as exc:  # noqa: BLE001
         _LOGGER.exception("Echec de la construction du graphe pour %s", entity_id)
         connection.send_error(msg["id"], "parse_failed", str(exc))

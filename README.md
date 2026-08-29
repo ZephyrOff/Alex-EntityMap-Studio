@@ -116,15 +116,23 @@ reste affichée mais non cliquable, plutôt que de naviguer au mauvais endroit.
 Choisis une automatisation ou un script dans le menu déroulant pour voir son
 **graphe** (déclencheurs → conditions → actions, branches `if`/`choose`
 comprises) : molette pour zoomer, glisser le fond pour déplacer la vue,
-glisser un nœud pour le repositionner.
+glisser un nœud pour le repositionner. Chaque type de nœud a sa propre
+couleur et son propre symbole (légende sous le graphe : ▶ déclencheur,
+◆ condition, ✦ choix, ● action, ■ arrêt, ○ autre).
+
+**Noms réels** — les entités et appareils référencés (déclencheurs,
+conditions, actions) sont affichés avec leur nom convivial réel plutôt que
+leur identifiant technique brut, y compris pour les déclencheurs/conditions/
+actions de type **Appareil** (`device_id`, un long identifiant
+hexadécimal — jamais affiché brut dès qu'un nom est disponible).
 
 **Simulation** — choisis un déclencheur, force éventuellement l'état de
 certaines entités (celles utilisées dans les conditions du graphe sont
-proposées automatiquement, avec l'état réel actuel affiché en indication),
-puis clique sur « Simuler » : le chemin réellement emprunté s'illumine en
-jaune sur le graphe, les nœuds non atteints s'estompent. **Aucun service
-n'est jamais appelé** — la simulation se contente de déterminer, par le
-calcul, quel chemin serait suivi.
+proposées automatiquement, avec leur nom réel et l'état actuel affiché en
+indication), puis clique sur « Simuler » : le chemin réellement emprunté
+s'illumine en doré sur le graphe, les nœuds non atteints s'estompent.
+**Aucun service n'est jamais appelé** — la simulation se contente de
+déterminer, par le calcul, quel chemin serait suivi.
 
 Ce qui est couvert par le moteur d'évaluation : conditions `state`,
 `numeric_state`, `and`/`or`/`not`, imbriquées à volonté. Ce qui ne l'est
