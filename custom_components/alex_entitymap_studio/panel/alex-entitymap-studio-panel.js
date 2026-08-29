@@ -227,7 +227,10 @@ class AlexEntityMapStudioPanel extends HTMLElement {
         #graph-wrap {
           position: relative;
           border: 1px solid rgba(255,255,255,.08); border-radius: 14px;
-          overflow: hidden; background: #14171c; touch-action: none;
+          overflow: hidden; touch-action: none;
+          background-color: #14171c;
+          background-image: radial-gradient(rgba(255,255,255,.07) 1px, transparent 1px);
+          background-size: 24px 24px;
         }
         #automation-graph-svg { display: block; cursor: grab; }
         #automation-graph-svg.panning { cursor: grabbing; }
@@ -827,7 +830,7 @@ class AlexEntityMapStudioPanel extends HTMLElement {
       <div class="card">
         <h2>Graphe</h2>
         <div id="graph-wrap">
-          <svg id="automation-graph-svg" viewBox="0 0 900 560" width="100%" height="560"></svg>
+          <svg id="automation-graph-svg" viewBox="0 0 900 840" width="100%" height="840"></svg>
         </div>
         <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:10px;font-size:11px;color:var(--secondary-text-color);">
           <span>▶ Déclencheur</span>
@@ -964,14 +967,10 @@ class AlexEntityMapStudioPanel extends HTMLElement {
 
     svg.innerHTML = `
       <defs>
-        <pattern id="graph-grid" width="24" height="24" patternUnits="userSpaceOnUse">
-          <circle cx="1" cy="1" r="1" fill="rgba(255,255,255,.06)" />
-        </pattern>
         <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
           <path d="M0,0 L8,4 L0,8 Z" fill="rgba(255,255,255,.45)" />
         </marker>
       </defs>
-      <rect x="0" y="0" width="900" height="560" fill="url(#graph-grid)" />
       <g id="graph-viewport" transform="translate(${this._graphPan.x},${this._graphPan.y}) scale(${this._graphZoom})">
         ${edgesHtml}
         ${nodesHtml}
