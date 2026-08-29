@@ -141,8 +141,8 @@ vérifications sans lien, comme plusieurs volets à la suite) ne bloque plus
 la simulation à la première condition non déterminée : si les deux issues
 possibles (vrai/faux) se rejoignent rapidement au même endroit, la
 simulation continue au-delà, marquant seulement ce qui est entre les deux
-comme **incertain** (contour en pointillés) plutôt que d'arrêter tout le
-reste du graphe.
+comme **incertain** (nœuds à contour pointillé, liens en tirets dorés)
+plutôt que d'arrêter tout le reste du graphe.
 
 Ce qui est couvert par le moteur d'évaluation :
 - Conditions `state`, `numeric_state`, `and`/`or`/`not`, imbriquées à
@@ -152,6 +152,10 @@ Ce qui est couvert par le moteur d'évaluation :
   `switch.is_on`, `light.is_on`...), avec le comportement « un seul
   suffit » ou « tous requis » pour plusieurs cibles. Le délai minimal
   (`for:`) n'est en revanche pas vérifié — traité comme déjà satisfait.
+- **`condition: trigger`** — très fréquente dans les automatisations à
+  plusieurs déclencheurs qui se distinguent ensuite par « quel déclencheur
+  a réellement démarré cette exécution ? ». Évaluée avec certitude à partir
+  du déclencheur que **tu** as choisi pour la simulation, jamais devinée.
 
 Ce qui ne l'est **pas** dans cette version, annoncé comme tel plutôt que
 deviné silencieusement :

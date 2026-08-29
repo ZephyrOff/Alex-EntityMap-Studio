@@ -258,6 +258,7 @@ class AlexEntityMapStudioPanel extends HTMLElement {
         .node-detail-body { padding: 14px; font-size: 14px; line-height: 1.5; white-space: pre-wrap; }
         .graph-edge { stroke: rgba(255,255,255,.28); stroke-width: 2; fill: none; }
         .graph-edge.taken { stroke: #ffd54f; stroke-width: 3; filter: drop-shadow(0 0 3px rgba(255,213,79,.5)); }
+        .graph-edge.uncertain { stroke: #ffd54f; stroke-width: 2; stroke-dasharray: 5,4; opacity: .65; }
         .graph-edge-label { fill: rgba(255,255,255,.75); font-size: 10px; }
         .layout { display: flex; height: calc(100% - 64px); }
         .sidebar {
@@ -914,6 +915,7 @@ class AlexEntityMapStudioPanel extends HTMLElement {
     const visitedSet = new Set(sim ? sim.visited_node_ids : []);
     const uncertainSet = new Set(sim ? sim.uncertain_node_ids || [] : []);
     const takenSet = new Set(sim ? sim.taken_edges.map((e) => `${e.source}|${e.target}`) : []);
+    const uncertainEdgeSet = new Set(sim ? (sim.uncertain_edges || []).map((e) => `${e.source}|${e.target}`) : []);
 
     const edgesHtml = g.edges
       .map((e) => {
@@ -926,10 +928,11 @@ class AlexEntityMapStudioPanel extends HTMLElement {
         const midX = (x1 + x2) / 2;
         const midY = (y1 + y2) / 2;
         const isTaken = takenSet.has(`${e.source}|${e.target}`);
+        const isUncertainEdge = uncertainEdgeSet.has(`${e.source}|${e.target}`);
         const shortLabel = e.label ? (e.label.length > 16 ? e.label.slice(0, 15) + "…" : e.label) : "";
         return `
           <g>
-            <path class="graph-edge ${isTaken ? "taken" : ""}" d="M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}" marker-end="url(#arrow)" />
+            <path class="graph-edge ${isTaken ? "taken" : ""} ${isUncertainEdge ? "uncertain" : ""}" d="M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}" marker-end="url(#arrow)" />
             ${
               shortLabel
                 ? `<rect x="${midX - shortLabel.length * 3.2 - 6}" y="${midY - 9}" width="${shortLabel.length * 6.4 + 12}" height="16" fill="rgba(0,0,0,0.65)" rx="4" />

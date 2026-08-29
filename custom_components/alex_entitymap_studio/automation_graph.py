@@ -171,6 +171,10 @@ def _describe_single_condition(cond, names: dict[str, str] | None = None) -> str
         if below is not None:
             return f"{entities_str} < {below}"
         return f"Valeur numérique de {entities_str}"
+    if ctype == "trigger":
+        wanted = cond.get("id")
+        wanted_str = ", ".join(wanted) if isinstance(wanted, list) else str(wanted)
+        return f"Déclencheur = {wanted_str}"
     if ctype == "device":
         entity_id = cond.get("entity_id")
         if entity_id:
@@ -235,6 +239,14 @@ def describe_action_step(step: dict, names: dict[str, str] | None = None) -> tup
         entity_id = target.get("entity_id") or step.get("entity_id")
         if entity_id:
             return "action", f"{service} → {_labels(entity_id, names)}"
+        # Cible par label/zone/appareil plutot que par entite directe --
+        # toujours indiquer QUELQUE CHOSE plutot que le service seul, sans
+        # quoi l'action semble ne rien cibler du tout.
+        for key, prefix in (("label_id", "étiquette"), ("area_id", "zone"), ("device_id", "appareil")):
+            value = target.get(key)
+            if value:
+                value_str = ", ".join(value) if isinstance(value, list) else str(value)
+                return "action", f"{service} → {prefix} {value_str}"
         return "action", str(service)
     return "opaque", "Étape non reconnue"
 
@@ -417,9 +429,15 @@ class StateSnapshot:
     attributes: dict = field(default_factory=dict)
 
 
-def evaluate_condition(condition, get_state) -> bool | None:
+def evaluate_condition(condition, get_state, current_trigger_id: str | None = None) -> bool | None:
+    """`current_trigger_id` : l'id (champ `id:` du declencheur choisi pour
+    CETTE simulation, pas l'id interne du noeud graphe) -- necessaire pour
+    evaluer une condition `condition: trigger`, tres frequente dans les
+    automatisations a plusieurs declencheurs qui se distinguent ensuite par
+    "quel declencheur a reellement demarre cette execution ?". Sans le
+    fournir, ce type de condition reste indetermine."""
     if isinstance(condition, list):
-        results = [evaluate_condition(c, get_state) for c in condition]
+        results = [evaluate_condition(c, get_state, current_trigger_id) for c in condition]
         if any(r is None for r in results):
             return None
         return all(results)
@@ -431,6 +449,17 @@ def evaluate_condition(condition, get_state) -> bool | None:
         return None
 
     ctype = condition.get("condition")
+
+    if ctype == "trigger":
+        # Compare le declencheur CHOISI pour cette simulation (fourni par
+        # l'appelant, jamais devine) a la liste d'id attendue -- permet de
+        # distinguer plusieurs `if` qui ne different QUE par le
+        # declencheur d'origine, motif tres courant.
+        if current_trigger_id is None:
+            return None
+        wanted_ids = condition.get("id")
+        wanted_ids = wanted_ids if isinstance(wanted_ids, list) else [wanted_ids]
+        return current_trigger_id in wanted_ids
 
     if isinstance(ctype, str) and ctype.rsplit(".", 1)[-1] in ("is_on", "is_off"):
         # Famille "<domaine>.is_on"/"is_off" -- confirmee documentation
@@ -465,7 +494,9 @@ def evaluate_condition(condition, get_state) -> bool | None:
     if ctype == "state":
         entity_id = condition.get("entity_id")
         if isinstance(entity_id, list):
-            sub_results = [evaluate_condition({**condition, "entity_id": e}, get_state) for e in entity_id]
+            sub_results = [
+                evaluate_condition({**condition, "entity_id": e}, get_state, current_trigger_id) for e in entity_id
+            ]
             if any(r is None for r in sub_results):
                 return None
             return all(sub_results)
@@ -498,10 +529,12 @@ def evaluate_condition(condition, get_state) -> bool | None:
         return True
 
     if ctype == "and":
-        return evaluate_condition(condition.get("conditions", []), get_state)
+        return evaluate_condition(condition.get("conditions", []), get_state, current_trigger_id)
 
     if ctype == "or":
-        sub_results = [evaluate_condition(c, get_state) for c in condition.get("conditions", [])]
+        sub_results = [
+            evaluate_condition(c, get_state, current_trigger_id) for c in condition.get("conditions", [])
+        ]
         if any(r is True for r in sub_results):
             return True
         if any(r is None for r in sub_results):
@@ -509,10 +542,10 @@ def evaluate_condition(condition, get_state) -> bool | None:
         return False
 
     if ctype == "not":
-        inner = evaluate_condition(condition.get("conditions", []), get_state)
+        inner = evaluate_condition(condition.get("conditions", []), get_state, current_trigger_id)
         return None if inner is None else not inner
 
-    # template / time / sun / zone / trigger / device... : pas evalue dans
+    # template / time / sun / zone / device... : pas evalue dans
     # cette version -- indetermine plutot qu'une fausse certitude.
     return None
 
@@ -522,6 +555,7 @@ class SimulationResult:
     visited_node_ids: list[str] = field(default_factory=list)
     taken_edges: list[tuple[str, str]] = field(default_factory=list)  # (source, target) reellement empruntes
     uncertain_node_ids: list[str] = field(default_factory=list)  # noeuds "peut-etre" -- voir _find_convergence
+    uncertain_edges: list[tuple[str, str]] = field(default_factory=list)  # aretes "peut-etre" (meme raison)
     undetermined_at: str | None = None  # id du noeud ou la simulation s'est arretee, faute de pouvoir evaluer
     stopped_reason: str | None = None  # "condition_false" | "undetermined" | "end_of_branch" | None (arrivee normale en fin d'action)
 
@@ -598,6 +632,14 @@ def simulate_from_trigger(graph: AutomationGraph, trigger_id: str, get_state) ->
     result = SimulationResult(visited_node_ids=[trigger_id])
     current_id = trigger_id
 
+    # Le CHAMP id: du declencheur choisi (ex. "alex_monte"), pas l'id du
+    # noeud du graphe (ex. "n2") -- necessaire pour evaluer une eventuelle
+    # condition `condition: trigger` plus loin dans la sequence, tres
+    # frequente pour distinguer plusieurs `if` selon quel declencheur a
+    # reellement demarre cette execution.
+    trigger_node = node_by_id.get(trigger_id)
+    current_trigger_id = (trigger_node.raw or {}).get("id") if trigger_node else None
+
     while True:
         node = node_by_id.get(current_id)
         if node is None:
@@ -609,7 +651,7 @@ def simulate_from_trigger(graph: AutomationGraph, trigger_id: str, get_state) ->
 
         if node.kind in ("if", "condition"):
             payload = _condition_payload_for_node(node)
-            outcome = evaluate_condition(payload, get_state)
+            outcome = evaluate_condition(payload, get_state, current_trigger_id)
             if outcome is None:
                 # Avant d'abandonner : si les deux branches (vrai/faux)
                 # convergent rapidement vers le meme noeud -- cas typique
@@ -630,6 +672,17 @@ def simulate_from_trigger(graph: AutomationGraph, trigger_id: str, get_state) ->
                         conv_id, path_a, path_b = convergence
                         result.uncertain_node_ids.extend(path_a[:-1])
                         result.uncertain_node_ids.extend(path_b[:-1])
+                        # Les ARETES du chemin incertain -- oubliees dans la
+                        # premiere version de cette logique, ce qui faisait
+                        # apparaitre les noeuds "peut-etre" comme allumes
+                        # sans que les liens qui y menent le soient. Inclut
+                        # l'arete de branchement elle-meme (vrai_edge/
+                        # faux_edge) en plus des aretes a l'interieur de
+                        # chaque chemin.
+                        result.uncertain_edges.append((current_id, vrai_edge.target))
+                        result.uncertain_edges.append((current_id, faux_edge.target))
+                        result.uncertain_edges.extend(zip(path_a[:-1], path_a[1:]))
+                        result.uncertain_edges.extend(zip(path_b[:-1], path_b[1:]))
                         result.visited_node_ids.append(conv_id)
                         current_id = conv_id
                         continue
@@ -662,7 +715,7 @@ def simulate_from_trigger(graph: AutomationGraph, trigger_id: str, get_state) ->
             # ce module, donc cette correspondance par position reste fiable.
             chosen_edge = None
             for i, option in enumerate(options):
-                outcome = evaluate_condition(option.get("conditions", []), get_state)
+                outcome = evaluate_condition(option.get("conditions", []), get_state, current_trigger_id)
                 if outcome is None:
                     result.undetermined_at = current_id
                     result.stopped_reason = "undetermined"
