@@ -189,6 +189,7 @@ async def websocket_simulate_automation(hass: HomeAssistant, connection, msg) ->
         {
             "visited_node_ids": result.visited_node_ids,
             "taken_edges": [{"source": s, "target": t} for s, t in result.taken_edges],
+            "uncertain_node_ids": result.uncertain_node_ids,
             "undetermined_at": result.undetermined_at,
             "stopped_reason": result.stopped_reason,
         },

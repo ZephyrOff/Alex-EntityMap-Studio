@@ -113,12 +113,14 @@ reste affichée mais non cliquable, plutôt que de naviguer au mauvais endroit.
 
 ## Automation Checker
 
-Choisis une automatisation ou un script dans le menu déroulant pour voir son
-**graphe** (déclencheurs → conditions → actions, branches `if`/`choose`
-comprises) : molette pour zoomer, glisser le fond pour déplacer la vue,
-glisser un nœud pour le repositionner. Chaque type de nœud a sa propre
-couleur et son propre symbole (légende sous le graphe : ▶ déclencheur,
-◆ condition, ✦ choix, ● action, ■ arrêt, ○ autre).
+Recherche une automatisation ou un script dans la liste (nom ou entity_id)
+pour voir son **graphe** (déclencheurs → conditions → actions, branches
+`if`/`choose` comprises) : molette pour zoomer, glisser le fond pour
+déplacer la vue, glisser un nœud pour le repositionner. **Cliquer** (sans
+glisser) sur un nœud affiche son contenu complet, non tronqué — utile pour
+les grosses conditions qui ne tiennent pas dans la largeur d'un nœud.
+Chaque type de nœud a sa propre couleur et son propre symbole (légende sous
+le graphe : ▶ déclencheur, ◆ condition, ✦ choix, ● action, ■ arrêt, ○ autre).
 
 **Noms réels** — les entités et appareils référencés (déclencheurs,
 conditions, actions) sont affichés avec leur nom convivial réel plutôt que
@@ -134,10 +136,25 @@ s'illumine en doré sur le graphe, les nœuds non atteints s'estompent.
 **Aucun service n'est jamais appelé** — la simulation se contente de
 déterminer, par le calcul, quel chemin serait suivi.
 
-Ce qui est couvert par le moteur d'évaluation : conditions `state`,
-`numeric_state`, `and`/`or`/`not`, imbriquées à volonté. Ce qui ne l'est
-**pas** dans cette version, annoncé comme tel plutôt que deviné
-silencieusement :
+Un séquence de plusieurs `if` indépendants les uns des autres (une série de
+vérifications sans lien, comme plusieurs volets à la suite) ne bloque plus
+la simulation à la première condition non déterminée : si les deux issues
+possibles (vrai/faux) se rejoignent rapidement au même endroit, la
+simulation continue au-delà, marquant seulement ce qui est entre les deux
+comme **incertain** (contour en pointillés) plutôt que d'arrêter tout le
+reste du graphe.
+
+Ce qui est couvert par le moteur d'évaluation :
+- Conditions `state`, `numeric_state`, `and`/`or`/`not`, imbriquées à
+  volonté — y compris sur un **attribut** précis (`attribute:`), pas
+  seulement l'état brut.
+- La famille de conditions plus récente `<domaine>.is_on`/`is_off` (ex.
+  `switch.is_on`, `light.is_on`...), avec le comportement « un seul
+  suffit » ou « tous requis » pour plusieurs cibles. Le délai minimal
+  (`for:`) n'est en revanche pas vérifié — traité comme déjà satisfait.
+
+Ce qui ne l'est **pas** dans cette version, annoncé comme tel plutôt que
+deviné silencieusement :
 - Les conditions par **template Jinja brut** — la simulation s'arrête avec
   « indéterminé » plutôt que d'inventer un résultat.
 - `repeat`, `parallel`, `wait_for_trigger` — représentés comme un nœud

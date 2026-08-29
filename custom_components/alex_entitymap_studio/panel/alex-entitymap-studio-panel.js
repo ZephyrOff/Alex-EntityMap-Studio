@@ -225,6 +225,7 @@ class AlexEntityMapStudioPanel extends HTMLElement {
         .btn-outline { background: rgba(255,255,255,.12); color: white; }
         .btn-outline.active { background: white; color: var(--primary-color, #03a9f4); }
         #graph-wrap {
+          position: relative;
           border: 1px solid rgba(255,255,255,.08); border-radius: 14px;
           overflow: hidden; background: #14171c; touch-action: none;
         }
@@ -237,6 +238,24 @@ class AlexEntityMapStudioPanel extends HTMLElement {
         .graph-node .node-icon { font-size: 15px; fill: rgba(0,0,0,.55); }
         .graph-node text.node-label { fill: rgba(0,0,0,.82); font-size: 11.5px; font-weight: 600; pointer-events: none; }
         .graph-node.visited rect { stroke: #fff59d; stroke-width: 2.5; }
+        .graph-node.uncertain rect { stroke: rgba(255,255,255,.85); stroke-dasharray: 5,3; opacity: .6; }
+        .node-detail-overlay {
+          position: absolute; inset: 0; background: rgba(0,0,0,.55);
+          display: flex; align-items: center; justify-content: center; z-index: 5;
+        }
+        .node-detail-box {
+          background: var(--card-background-color, #1e1e1e); border-radius: 12px;
+          max-width: 85%; max-height: 80%; overflow-y: auto;
+          box-shadow: 0 8px 30px rgba(0,0,0,.5);
+        }
+        .node-detail-header {
+          display: flex; justify-content: space-between; align-items: center;
+          padding: 10px 14px; border-bottom: 1px solid rgba(255,255,255,.1);
+          font-size: 12px; text-transform: uppercase; letter-spacing: .03em; color: var(--secondary-text-color);
+        }
+        .node-detail-close { cursor: pointer; opacity: .7; }
+        .node-detail-close:hover { opacity: 1; }
+        .node-detail-body { padding: 14px; font-size: 14px; line-height: 1.5; white-space: pre-wrap; }
         .graph-edge { stroke: rgba(255,255,255,.28); stroke-width: 2; fill: none; }
         .graph-edge.taken { stroke: #ffd54f; stroke-width: 3; filter: drop-shadow(0 0 3px rgba(255,213,79,.5)); }
         .graph-edge-label { fill: rgba(255,255,255,.75); font-size: 10px; }
@@ -718,32 +737,55 @@ class AlexEntityMapStudioPanel extends HTMLElement {
     el.innerHTML = `
       <div class="card">
         <h2>Automation Checker</h2>
-        <div class="filters" style="margin-bottom:0;">
-          <select id="automation-select">
-            <option value="">— choisir une automatisation/un script —</option>
-            ${automations
-              .map(
-                (a) =>
-                  `<option value="${escapeHtml(a.entity_id)}" ${a.entity_id === this._automationSelected ? "selected" : ""}>${escapeHtml(a.name)}</option>`
-              )
-              .join("")}
-          </select>
+        <div class="filters" style="margin-bottom:10px;">
+          <input type="text" id="automation-search" placeholder="Rechercher une automatisation/un script..." style="width:100%;" />
         </div>
+        <div id="automation-list" style="max-height:220px;overflow-y:auto;"></div>
       </div>
       <div id="graph-section"></div>
     `;
 
-    this.shadowRoot.querySelector("#automation-select").addEventListener("change", (ev) => {
-      if (ev.target.value) {
-        this._loadAutomationGraph(ev.target.value);
-      } else {
-        this._automationSelected = null;
-        this._automationGraph = null;
-        const section = this.shadowRoot.querySelector("#graph-section");
-        if (section) section.innerHTML = "";
-      }
+    this._automationSearchText = this._automationSearchText || "";
+    this.shadowRoot.querySelector("#automation-search").value = this._automationSearchText;
+    this._renderAutomationList(automations);
+
+    this.shadowRoot.querySelector("#automation-search").addEventListener("input", (ev) => {
+      this._automationSearchText = ev.target.value.toLowerCase();
+      this._renderAutomationList(automations);
     });
 
+    this._maybeRenderGraphSection();
+  }
+
+  _renderAutomationList(automations) {
+    const list = this.shadowRoot.querySelector("#automation-list");
+    if (!list) return;
+    const query = this._automationSearchText || "";
+    const filtered = automations.filter(
+      (a) => a.name.toLowerCase().includes(query) || a.entity_id.toLowerCase().includes(query)
+    );
+    if (!filtered.length) {
+      list.innerHTML = `<div class="empty">Aucun résultat.</div>`;
+      return;
+    }
+    list.innerHTML = filtered
+      .map(
+        (a) => `
+          <div class="entity-row ${a.entity_id === this._automationSelected ? "selected" : ""}" data-entity-id="${escapeHtml(a.entity_id)}">
+            <div class="ename">${escapeHtml(a.name)}</div>
+            <div class="eid">${escapeHtml(a.entity_id)}</div>
+          </div>`
+      )
+      .join("");
+    list.querySelectorAll(".entity-row").forEach((row) => {
+      row.addEventListener("click", () => {
+        this._loadAutomationGraph(row.getAttribute("data-entity-id"));
+        this._renderAutomationList(automations);
+      });
+    });
+  }
+
+  _maybeRenderGraphSection() {
     if (this._automationSelected && this._automationGraph) {
       this._renderGraphSection();
     }
@@ -793,6 +835,7 @@ class AlexEntityMapStudioPanel extends HTMLElement {
           <span>● Action</span>
           <span>■ Arrêt</span>
           <span>○ Autre</span>
+          <span style="opacity:.7;">┄ Incertain (voir Simuler)</span>
         </div>
         <div class="hint">Molette pour zoomer, glisser le fond pour déplacer la vue, glisser un nœud pour le repositionner.</div>
       </div>
@@ -869,6 +912,7 @@ class AlexEntityMapStudioPanel extends HTMLElement {
     const g = this._automationGraph;
     const sim = this._simulationResult;
     const visitedSet = new Set(sim ? sim.visited_node_ids : []);
+    const uncertainSet = new Set(sim ? sim.uncertain_node_ids || [] : []);
     const takenSet = new Set(sim ? sim.taken_edges.map((e) => `${e.source}|${e.target}`) : []);
 
     const edgesHtml = g.edges
@@ -902,10 +946,12 @@ class AlexEntityMapStudioPanel extends HTMLElement {
         const color = NODE_KIND_COLORS[n.kind] || "#cbd5e1";
         const icon = NODE_KIND_ICONS[n.kind] || "○";
         const isVisited = visitedSet.has(n.id);
-        const dimmed = sim && !isVisited;
+        const isUncertain = uncertainSet.has(n.id);
+        const dimmed = sim && !isVisited && !isUncertain;
         const label = n.label.length > 30 ? n.label.slice(0, 29) + "…" : n.label;
+        const stateClass = isVisited ? "visited" : isUncertain ? "uncertain" : "";
         return `
-          <g class="graph-node ${isVisited ? "visited" : ""}" data-node-id="${n.id}" transform="translate(${p.x},${p.y})">
+          <g class="graph-node ${stateClass}" data-node-id="${n.id}" transform="translate(${p.x},${p.y})">
             <rect width="${NODE_W}" height="${NODE_H}" rx="10" fill="${color}" opacity="${dimmed ? 0.3 : 1}" />
             <text class="node-icon" x="16" y="${NODE_H / 2 + 5}" text-anchor="middle">${icon}</text>
             <text class="node-label" x="34" y="${NODE_H / 2 + 4}">${escapeHtml(label)}</text>
@@ -954,6 +1000,7 @@ class AlexEntityMapStudioPanel extends HTMLElement {
 
     svg.addEventListener("pointermove", (ev) => {
       if (this._graphDragNode) {
+        this._nodeDragMoved = true;
         const p = this._svgPointFromEvent(svg, ev);
         this._nodePositions[this._graphDragNode] = { x: p.x - NODE_W / 2, y: p.y - NODE_H / 2 };
         this._renderGraphSvg();
@@ -969,8 +1016,16 @@ class AlexEntityMapStudioPanel extends HTMLElement {
     });
 
     const endInteraction = () => {
+      // Un glissement de noeud qui n'a JAMAIS bouge est en realite un
+      // simple clic -- affiche le detail complet plutot que de le traiter
+      // comme un repositionnement (meme garde-fou "juste glisse" que dans
+      // Alex Scene Studio, pour ne pas confondre les deux gestes).
+      if (this._graphDragNode && !this._nodeDragMoved) {
+        this._showNodeDetail(this._graphDragNode);
+      }
       this._graphPanning = false;
       this._graphDragNode = null;
+      this._nodeDragMoved = false;
       svg.classList.remove("panning");
     };
     svg.addEventListener("pointerup", endInteraction);
@@ -980,6 +1035,37 @@ class AlexEntityMapStudioPanel extends HTMLElement {
   _onNodePointerDown(ev, nodeId) {
     ev.stopPropagation();
     this._graphDragNode = nodeId;
+    this._nodeDragMoved = false;
+  }
+
+  // Affiche le contenu COMPLET d'un noeud (le libelle est tronque a
+  // l'affichage dans le graphe pour rester lisible) -- panneau simple en
+  // survol, pas une vraie boite de dialogue modale.
+  _showNodeDetail(nodeId) {
+    if (!this._automationGraph) return;
+    const node = this._automationGraph.nodes.find((n) => n.id === nodeId);
+    if (!node) return;
+    const existing = this.shadowRoot.querySelector("#node-detail-overlay");
+    if (existing) existing.remove();
+
+    const overlay = document.createElement("div");
+    overlay.id = "node-detail-overlay";
+    overlay.className = "node-detail-overlay";
+    overlay.innerHTML = `
+      <div class="node-detail-box">
+        <div class="node-detail-header">
+          <span>${NODE_KIND_ICONS[node.kind] || "○"} ${escapeHtml(node.kind)}</span>
+          <span class="node-detail-close" title="Fermer">✕</span>
+        </div>
+        <div class="node-detail-body">${escapeHtml(node.label)}</div>
+      </div>
+    `;
+    overlay.addEventListener("click", (ev) => {
+      if (ev.target === overlay || ev.target.classList.contains("node-detail-close")) {
+        overlay.remove();
+      }
+    });
+    this.shadowRoot.querySelector("#graph-wrap").appendChild(overlay);
   }
 
   // Conversion coordonnees ecran -> espace "logique" du graphe : passe par
@@ -1020,7 +1106,11 @@ class AlexEntityMapStudioPanel extends HTMLElement {
           end_of_branch: "Simulation terminée normalement, en fin de séquence.",
         };
         const reasonText = reasonLabels[result.stopped_reason] || "Simulation terminée.";
-        resultEl.innerHTML = `<div class="hint">${escapeHtml(reasonText)}</div>`;
+        const uncertainNote =
+          result.uncertain_node_ids && result.uncertain_node_ids.length
+            ? `<div class="hint" style="margin-top:4px;">Les nœuds en pointillés (┄) n'ont pas pu être confirmés individuellement (condition non déterminée), mais la simulation a continué au-delà car les deux issues possibles se rejoignaient au même endroit.</div>`
+            : "";
+        resultEl.innerHTML = `<div class="hint">${escapeHtml(reasonText)}</div>${uncertainNote}`;
       }
     } catch (err) {
       if (resultEl) {

@@ -71,6 +71,22 @@ def _labels(ids, names: dict[str, str] | None) -> str:
     return ", ".join(_label(i, names) for i in ids if i)
 
 
+def _target_entity_ids(d: dict) -> list[str]:
+    """Extrait les entity_id d'un dict de condition/declencheur -- soit
+    directement via `entity_id:` (syntaxe classique), soit via
+    `target: {entity_id: ...}` (syntaxe plus recente, ex. les conditions
+    "<domaine>.is_on" comme switch.is_on -- confirmee documentation
+    officielle HA). Les deux structures coexistent selon le type/l'age de
+    la condition, donc toujours verifier les deux plutot qu'une seule."""
+    target = d.get("target")
+    entity_id = target.get("entity_id") if isinstance(target, dict) else None
+    if entity_id is None:
+        entity_id = d.get("entity_id")
+    if entity_id is None:
+        return []
+    return entity_id if isinstance(entity_id, list) else [entity_id]
+
+
 def describe_trigger(trig: dict, names: dict[str, str] | None = None) -> str:
     platform = trig.get("platform") or trig.get("trigger") or "?"
     if platform == "state":
@@ -132,6 +148,13 @@ def _describe_single_condition(cond, names: dict[str, str] | None = None) -> str
     if not isinstance(cond, dict):
         return "Condition"
     ctype = cond.get("condition", "?")
+    if isinstance(ctype, str) and ctype.rsplit(".", 1)[-1] in ("is_on", "is_off"):
+        # Famille de conditions plus recente "<domaine>.is_on"/"is_off" (ex.
+        # switch.is_on, confirmee documentation officielle HA) -- entity_id
+        # est niche sous `target:`, jamais directement sur la condition.
+        entities_str = _labels(_target_entity_ids(cond), names)
+        verb = "est allumé" if ctype.endswith("is_on") else "est éteint"
+        return f"{entities_str} {verb}"
     if ctype == "state":
         entities_str = _labels(cond.get("entity_id"), names)
         state = cond.get("state")
@@ -409,6 +432,36 @@ def evaluate_condition(condition, get_state) -> bool | None:
 
     ctype = condition.get("condition")
 
+    if isinstance(ctype, str) and ctype.rsplit(".", 1)[-1] in ("is_on", "is_off"):
+        # Famille "<domaine>.is_on"/"is_off" -- confirmee documentation
+        # officielle HA (switch.is_on). Le "for" (duree minimale dans cet
+        # etat) n'est PAS verifie : on n'a que l'etat instantane (reel ou
+        # force), jamais un historique -- traite comme deja satisfait plutot
+        # que de deviner une duree, limite assumee et documentee.
+        entity_ids = _target_entity_ids(condition)
+        if not entity_ids:
+            return None
+        wants_on = ctype.endswith("is_on")
+        behavior = (condition.get("options") or {}).get("behavior", "any")
+        sub_results = []
+        for eid in entity_ids:
+            snap = get_state(eid)
+            if snap is None:
+                sub_results.append(None)
+                continue
+            is_on = snap.state == "on"
+            sub_results.append(is_on if wants_on else not is_on)
+        if behavior == "all":
+            if any(r is None for r in sub_results):
+                return None
+            return all(sub_results)
+        # "any" (comportement par defaut confirme par la doc HA)
+        if any(r is True for r in sub_results):
+            return True
+        if any(r is None for r in sub_results):
+            return None
+        return False
+
     if ctype == "state":
         entity_id = condition.get("entity_id")
         if isinstance(entity_id, list):
@@ -419,17 +472,21 @@ def evaluate_condition(condition, get_state) -> bool | None:
         snap = get_state(entity_id)
         if snap is None:
             return None
+        attribute = condition.get("attribute")
+        actual = snap.attributes.get(attribute) if attribute else snap.state
         expected = condition.get("state")
         expected_list = expected if isinstance(expected, list) else [expected]
-        return snap.state in expected_list
+        return actual in expected_list
 
     if ctype == "numeric_state":
         entity_id = condition.get("entity_id")
         snap = get_state(entity_id)
         if snap is None:
             return None
+        attribute = condition.get("attribute")
+        raw_value = snap.attributes.get(attribute) if attribute else snap.state
         try:
-            value = float(snap.state)
+            value = float(raw_value)
         except (TypeError, ValueError):
             return None
         above = condition.get("above")
@@ -464,6 +521,7 @@ def evaluate_condition(condition, get_state) -> bool | None:
 class SimulationResult:
     visited_node_ids: list[str] = field(default_factory=list)
     taken_edges: list[tuple[str, str]] = field(default_factory=list)  # (source, target) reellement empruntes
+    uncertain_node_ids: list[str] = field(default_factory=list)  # noeuds "peut-etre" -- voir _find_convergence
     undetermined_at: str | None = None  # id du noeud ou la simulation s'est arretee, faute de pouvoir evaluer
     stopped_reason: str | None = None  # "condition_false" | "undetermined" | "end_of_branch" | None (arrivee normale en fin d'action)
 
@@ -475,6 +533,61 @@ def _condition_payload_for_node(node: GraphNode):
     if node.kind == "if":
         return (node.raw or {}).get("if", [])
     return node.raw or {}
+
+
+def _find_convergence(
+    edges: list[GraphEdge], start_a: str, start_b: str, max_steps: int = 30
+) -> tuple[str, list[str], list[str]] | None:
+    """Cherche, par une recherche en largeur menee en parallele depuis deux
+    points de depart differents, le premier noeud commun atteignable des
+    deux cotes. Sert a continuer une simulation au-dela d'une condition
+    INDETERMINEE : quand les branches "vrai" et "faux" d'un `if` sans
+    `else` (ou une suite d'`if` independants les uns des autres, comme une
+    serie de verifications de volets) se rejoignent rapidement, on peut
+    poursuivre la simulation a partir de ce point commun sans avoir besoin
+    de trancher lequel des deux chemins a ete reellement emprunte --
+    seulement les noeuds ENTRE les deux (jamais confirmes) restent
+    marques "incertains" plutot que "visites".
+
+    Renvoie (id_du_point_commun, chemin_depuis_a, chemin_depuis_b) ou None
+    si rien de commun n'est trouve dans la limite de pas fixee (dans ce cas,
+    les deux branches divergent reellement -- pas de raccourci possible,
+    la simulation doit s'arreter comme avant)."""
+    if start_a == start_b:
+        return start_a, [start_a], [start_b]
+
+    visited_a: dict[str, list[str]] = {start_a: [start_a]}
+    visited_b: dict[str, list[str]] = {start_b: [start_b]}
+    frontier_a = [start_a]
+    frontier_b = [start_b]
+
+    for _ in range(max_steps):
+        if not frontier_a and not frontier_b:
+            break
+
+        next_frontier_a = []
+        for node_id in frontier_a:
+            for e in edges:
+                if e.source != node_id or e.target in visited_a:
+                    continue
+                visited_a[e.target] = visited_a[node_id] + [e.target]
+                if e.target in visited_b:
+                    return e.target, visited_a[e.target], visited_b[e.target]
+                next_frontier_a.append(e.target)
+        frontier_a = next_frontier_a
+
+        next_frontier_b = []
+        for node_id in frontier_b:
+            for e in edges:
+                if e.source != node_id or e.target in visited_b:
+                    continue
+                visited_b[e.target] = visited_b[node_id] + [e.target]
+                if e.target in visited_a:
+                    return e.target, visited_a[e.target], visited_b[e.target]
+                next_frontier_b.append(e.target)
+        frontier_b = next_frontier_b
+
+    return None
 
 
 def simulate_from_trigger(graph: AutomationGraph, trigger_id: str, get_state) -> SimulationResult:
@@ -498,6 +611,28 @@ def simulate_from_trigger(graph: AutomationGraph, trigger_id: str, get_state) ->
             payload = _condition_payload_for_node(node)
             outcome = evaluate_condition(payload, get_state)
             if outcome is None:
+                # Avant d'abandonner : si les deux branches (vrai/faux)
+                # convergent rapidement vers le meme noeud -- cas typique
+                # d'un `if` sans `else`, ou d'une suite d'`if` independants
+                # les uns des autres (une serie de verifications, comme
+                # plusieurs volets a la suite) -- on peut continuer la
+                # simulation a partir de ce point commun. Tout ce qui est
+                # entre les deux reste marque "incertain" (on ne sait pas
+                # lequel des deux chemins a reellement ete emprunte), mais
+                # la suite de la sequence, elle, reste simulable -- au lieu
+                # d'arreter tout le reste du graphe a cause d'UNE seule
+                # condition non determinee.
+                vrai_edge = next((e for e in outgoing if e.label == "vrai"), None)
+                faux_edge = next((e for e in outgoing if e.label == "faux"), None)
+                if vrai_edge and faux_edge:
+                    convergence = _find_convergence(graph.edges, vrai_edge.target, faux_edge.target)
+                    if convergence:
+                        conv_id, path_a, path_b = convergence
+                        result.uncertain_node_ids.extend(path_a[:-1])
+                        result.uncertain_node_ids.extend(path_b[:-1])
+                        result.visited_node_ids.append(conv_id)
+                        current_id = conv_id
+                        continue
                 result.undetermined_at = current_id
                 result.stopped_reason = "undetermined"
                 break
@@ -574,11 +709,7 @@ def referenced_entities_in_conditions(graph: AutomationGraph) -> list[str]:
             return
         if not isinstance(cond, dict):
             return
-        entity_id = cond.get("entity_id")
-        if isinstance(entity_id, str):
-            seen.add(entity_id)
-        elif isinstance(entity_id, list):
-            seen.update(e for e in entity_id if isinstance(e, str))
+        seen.update(_target_entity_ids(cond))
         for sub in cond.get("conditions", []):
             scan(sub)
 
